@@ -1,0 +1,5 @@
+[custom.all.lsm-rrbvector]
+type = "local"
+path = "."
+ipkg = "lsm-rrbvector.ipkg"
+test = "test/test.ipkg"

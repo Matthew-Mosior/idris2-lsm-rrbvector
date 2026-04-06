@@ -1,0 +1,15 @@
+package lsm-rrbvector
+
+authors   = "Matthew Mosior"
+brief     = "A Log-Structured Merge Relaxed Radix Balanced Vector"
+license   = "BSD-3 Clause"
+version   = 0.1.0
+sourcedir = "src"
+depends   = base
+          , array
+          , bytestring
+          , elab-util
+          , posix
+          , ref1
+modules   = Data.LSMRRBVector
+          , Data.LSMRRBVector.Internal
