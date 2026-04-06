@@ -9,6 +9,7 @@ import Data.Bits
 import Data.List
 import Data.Nat
 import Data.Linear.Ref1
+import Data.SortedMap
 import Data.String
 import Derive.Prelude
 import Syntax.T1 as T1
@@ -548,54 +549,35 @@ data RRBVector a = Root Nat   -- size
 --          Log-Structured Merge RRB Vectors (LSMRRBVector)
 --------------------------------------------------------------------------------
 
-||| LSMRRBVector is a concurrent log-structured vector built from:
-||| - striped write buffers (WriteBuffers)
-||| - an immutable RRB snapshot tree (RRBVector)
-||| - a global mutex controlling flush and rebuild operations
+||| LSMRRBVector is a concurrent LSM-style vector backed by an RRB vector.
+||| It separates write buffering from vector maintenance to reduce contention.
 |||
-||| Architecture:
-||| - Write path:
-|||   - Writes are distributed across multiple striped buffers.
-|||   - Each write is converted into an Entry (value + timestamp).
-|||   - Writes are fast and require only short critical sections.
-||| - Read path:
-|||   - Reads primarily consult the RRBVector snapshot.
-|||   - Buffered writes may not yet be visible until flushed.
-||| - Flush / merge path:
-|||   - Triggered when buffers exceed a threshold or by a background thread.
-|||   - A single Mutex is acquired to ensure exclusive rebuild.
-|||   - All buffers are drained and merged.
-|||   - Entries are ordered by timestamp (Tm).
-|||   - A new RRBVector is constructed and swapped in atomically.
+||| Each thread is associated with exactly one WriteBuffers instance,
+||| stored in a global registry protected by a dedicated Mutex.
+|||
+||| The `buffers` field contains:
+||| - A Mutex protecting structural updates to the registry.
+||| - A Ref to a Map from ThreadId → WriteBuffers.
+|||
+||| This registry is used for:
+||| - Thread registration (ensuring 1:1 ThreadId → buffer ownership).
+||| - Buffer lookup during initialization or recovery.
+||| - Flush coordination across threads.
+|||
+||| The `vector` field contains:
+||| - A Mutex protecting updates to the underlying RRBVector.
+||| - A Ref to the main RRB vector structure.
+|||
+||| This vector is updated only during flush/compaction phases where
+||| thread-local buffers are merged into the global structure.
 |||
 ||| Concurrency model:
-||| - buffers :
-|||   - Array (Ref s (WriteBuffers a))
-|||     → striped write hot path
-||| - tree :
-|||   - Ref s (RRBVector a)
-|||     → immutable snapshot, replaced under mutex
-||| - lock :
-|||   - Mutex
-|||     → ensures only one flush/rebuild occurs at a time
-|||
-||| Key properties:
-||| - High write throughput via striping
-||| - Low contention via buffer isolation
-||| - Deterministic global ordering via timestamps
-||| - Consistent snapshots via mutex-protected rebuild
-|||
-||| Trade-offs:
-||| - Writes are fast but not immediately visible
-||| - Flush operations are expensive but serialized
-||| - Ordering depends on timestamp correctness
-|||
-||| This design is optimized for write-heavy workloads with periodic batch
-||| compaction into a balanced immutable structure.
+||| - Writes go to thread-owned buffers (not directly to this structure).
+||| - Buffers mutex protects registry integrity.
+||| - Tree mutex protects structural updates during flush/merge.
 |||
 public export
 record LSMRRBVector s a where
   constructor MkLSMRRBVector
-  buffers : Array (Ref s (WriteBuffers a))
-  tree    : Ref s (RRBVector a)
-  lock    : Mutex
+  buffers : (Mutex, Ref s (Maybe (SortedMap Int (WriteBuffers a))))
+  vector  : (Mutex, Ref s (RRBVector a))
