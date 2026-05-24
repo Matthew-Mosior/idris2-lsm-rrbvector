@@ -100,6 +100,48 @@ registerThread regref tid t =
                     ) t
 
 --------------------------------------------------------------------------------
+--          Generation Utilities
+--------------------------------------------------------------------------------
+
+export
+enterGeneration :  Ref s (SortedMap ThreadId ReaderState)
+                -> ThreadId
+                -> Generation
+                -> F1' s
+enterGeneration readers tid gen t =
+    casmod1 readers (\readers' =>
+                      insert tid (MkReaderState gen) readers'
+                    ) t
+
+export
+leaveGeneration :  Ref s (SortedMap ThreadId ReaderState)
+                -> ThreadId
+                -> F1' s
+leaveGeneration readers tid t =
+    casmod1 readers (\readers' =>
+                      delete tid readers'
+                    ) t
+
+||| Finds oldest active generation.
+|||
+||| Returns:
+||| - Nothing when no readers exist.
+||| - Just generation otherwise.
+|||
+||| Properties:
+||| - O(n)
+|||
+export
+minimumGeneration :  SortedMap ThreadId ReaderState
+                  -> Maybe Generation
+minimumGeneration rs =
+    case map generation (values rs) of
+      []    =>
+        Nothing
+      x::xs =>
+        Just (foldl min x xs)
+
+--------------------------------------------------------------------------------
 --          Mutation Utilities
 --------------------------------------------------------------------------------
 
@@ -355,32 +397,64 @@ replayEntries es v =
 --          Publication
 --------------------------------------------------------------------------------
 
-||| Atomically publishes a newly rebuilt immutable snapshot.
+||| Atomically publishes a rebuilt snapshot.
 |||
 ||| Steps:
-||| - Replace the currently visible tree.
-||| - Increment snapshot generation.
-||| - Publish both together atomically.
+||| - Move current snapshot into retired list.
+||| - Increment generation.
+||| - Publish new current snapshot.
 |||
 ||| Properties:
-||| - Readers never observe mismatched (generation,tree) pairs.
-||| - Publication is linearizable.
-||| - O(1).
-|||
-||| Notes:
-||| - The rebuild service is the sole writer.
-||| - CAS protects against races with concurrent readers.
+||| - Snapshot publication is atomic.
+||| - Previous snapshot becomes reclaimable.
+||| - Readers always observe a consistent state.
 |||
 export
-publishSnapshot :  Ref s (SnapshotState a)
+publishSnapshot :  Ref s (CombinedSnapshotState a)
                 -> RRBVector a
                 -> F1' s
-publishSnapshot snapshotref new t =
-  casmod1 snapshotref (\snapshot =>
-                        { generation := S snapshot.generation
-                        , tree := new
-                        } snapshot
-                      ) t
+publishSnapshot combinedsnapshotstateref new t =
+  casmod1 combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers) =>
+                                     MkCombinedSnapshotState ( { generation :=
+                                                                   S snapshot.generation
+                                                               , tree := new
+                                                               } snapshot
+                                                             )
+                                                             ( ( MkRetiredSnapshot snapshot.generation
+                                                                                   snapshot.tree
+                                                               ) :: retired
+                                                             )
+                                                             readers
+                                   ) t
+
+--------------------------------------------------------------------------------
+--          Reclamation
+--------------------------------------------------------------------------------
+
+||| Reclaims retired snapshots that are no longer visible to readers.
+|||
+||| Rules:
+||| - If no readers exist: reclaim everything.
+||| - Otherwise: reclaim snapshots older than oldest active generation.
+|||
+||| Properties:
+||| - Safe generation-based reclamation.
+||| - O(number of retired snapshots)
+|||
+export
+reclaimSnapshots :  Ref s (CombinedSnapshotState a)
+                 -> F1' s
+reclaimSnapshots combinedsnapshotstate t =
+  casmod1 combinedsnapshotstate (\(MkCombinedSnapshotState snapshot retired readers) =>
+                                  let survivors = case minimumGeneration readers of
+                                                    Nothing     =>
+                                                      []
+                                                    Just mingen =>
+                                                      filter (\snap =>
+                                                               snap.generation >= mingen
+                                                             ) retired
+                                    in MkCombinedSnapshotState snapshot survivors readers
+                                ) t
 
 --------------------------------------------------------------------------------
 --          Rebuilder Service
@@ -399,16 +473,16 @@ publishSnapshot snapshotref new t =
 export covering
 handleRebuildRequest  :  Ord (Entry a)
                       => Ref World (SortedMap Int (ThreadContext a))
-                      -> Ref World (SnapshotState a)
+                      -> Ref World (CombinedSnapshotState a)
                       -> RebuildServiceState
                       -> (req : RebuildRequest)
                       -> Async e [] (RebuildServiceState, RebuildResponse req)
-handleRebuildRequest buffers snapshot st Trigger =
+handleRebuildRequest buffers combinedsnapshotstate st Trigger =
   pure
     ( { rebuildpending := True } st
     , ()
     )
-handleRebuildRequest buffers snapshot st Flush   = do
+handleRebuildRequest buffers combinedsnapshotstate st Flush   = do
   let st1     : RebuildServiceState
       st1     = { rebuildphase := RotatingBuffers
                 } st
@@ -424,19 +498,20 @@ handleRebuildRequest buffers snapshot st Flush   = do
       st4     : RebuildServiceState
       st4     = { rebuildphase := ApplyingOperations
                 } st3
-  oldsnapshot <- liftIO (runIO (read1 snapshot))
-  let rebuilt = replayEntries sorted oldsnapshot.tree
+  oldcombinedsnapshotstate <- liftIO (runIO (read1 combinedsnapshotstate))
+  let rebuilt = replayEntries sorted oldcombinedsnapshotstate.currentsnapshot.tree
       st5     : RebuildServiceState
       st5     = { rebuildphase := PublishingSnapshot
                 } st4
-  liftIO (runIO (publishSnapshot snapshot rebuilt))
-  newsnapshot <- liftIO (runIO (read1 snapshot))
+  liftIO (runIO (publishSnapshot combinedsnapshotstate rebuilt))
+  liftIO (runIO (reclaimSnapshots combinedsnapshotstate))
+  newcombinedsnapshotstate <- liftIO (runIO (read1 combinedsnapshotstate))
   pure
     ( MkRebuildServiceState
         Sleeping
         False
         Nothing
-    , newsnapshot.generation
+    , newcombinedsnapshotstate.currentsnapshot.generation
     )
 
 --------------------------------------------------------------------------------
@@ -465,14 +540,14 @@ handleRebuildRequest buffers snapshot st Flush   = do
 export covering
 spawnRebuilderService :  Ord (Entry a)
                       => Ref World (SortedMap Int (ThreadContext a))
-                      -> Ref World (SnapshotState a)
+                      -> Ref World (CombinedSnapshotState a)
                       -> Async e [] (Service e [] RebuildRequest RebuildResponse)
-spawnRebuilderService buffers snapshot =
+spawnRebuilderService buffers combinedsnapshotstate =
   service RebuildResponse
           initialRebuildServiceState
           ( handleRebuildRequest
               buffers
-              snapshot
+              combinedsnapshotstate
           )
 
 --------------------------------------------------------------------------------
@@ -484,10 +559,10 @@ export covering
 empty :  Ord (Entry a)
       => F1 World (LSMRRBVector World e a)
 empty t =
-  let buffers    # t := ref1 Data.SortedMap.empty t
-      snapshot   # t := ref1 (MkSnapshotState Z Empty) t
-      rebuilder      := spawnRebuilderService buffers snapshot
-    in MkLSMRRBVector buffers snapshot (MkManagedService rebuilder) # t
+  let buffers               # t := ref1 Data.SortedMap.empty t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty) t
+      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate
+    in MkLSMRRBVector buffers combinedsnapshotstate (MkManagedService rebuilder) # t
 
 ||| A log-structured merge vector with a single element. O(1)
 export covering
@@ -495,7 +570,7 @@ singleton :  Ord (Entry a)
           => a
           -> F1 World (LSMRRBVector World e a)
 singleton x t =
-  let buffers    # t := ref1 Data.SortedMap.empty t
-      snapshot   # t := ref1 (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) t
-      rebuilder      := spawnRebuilderService buffers snapshot
-    in MkLSMRRBVector buffers snapshot (MkManagedService rebuilder) # t
+  let buffers               # t := ref1 Data.SortedMap.empty t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty) t
+      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate
+    in MkLSMRRBVector buffers combinedsnapshotstate (MkManagedService rebuilder) # t

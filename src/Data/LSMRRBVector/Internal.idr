@@ -361,6 +361,24 @@ data Registration a
   | New a
 
 --------------------------------------------------------------------------------
+--          Reader State
+--------------------------------------------------------------------------------
+
+||| Reader participation in generation tracking.
+|||
+||| Readers announce the snapshot generation currently being observed.
+|||
+||| Properties:
+||| - Updated only when entering/leaving a snapshot read section.
+||| - Used by reclamation to determine oldest active generation.
+||| - One entry per participating thread.
+|||
+public export
+record ReaderState where
+  constructor MkReaderState
+  generation : Generation
+
+--------------------------------------------------------------------------------
 --          Snapshot State
 --------------------------------------------------------------------------------
 
@@ -400,6 +418,60 @@ record SnapshotState a where
   tree       : RRBVector a
 
 --------------------------------------------------------------------------------
+--          Retired Snapshot
+--------------------------------------------------------------------------------
+
+||| Snapshot awaiting reclamation.
+|||
+||| A snapshot becomes retired after publication of a newer snapshot.
+|||
+||| Properties:
+||| - Immutable after retirement.
+||| - Safe to reclaim once no reader references its generation.
+|||
+public export
+record RetiredSnapshot a where
+  constructor MkRetiredSnapshot
+  generation : Generation
+  tree       : RRBVector a
+
+--------------------------------------------------------------------------------
+--          Combined Snapshot State
+--------------------------------------------------------------------------------
+
+||| Combined snapshot publication and reclamation state.
+|||
+||| Ownership:
+||| - Exclusively modified by publication/reclamation logic.
+|||
+||| Fields:
+||| - currentsnapshot: Current published immutable snapshot.
+||| - retiredsnapshots: Older snapshots awaiting reclamation.
+||| - readerstate: Active reader generation announcements.
+|||
+||| Properties:
+||| - Publication and retirement are atomic.
+||| - Reader visibility is linearizable.
+||| - Reclamation decisions use consistent state.
+|||
+||| Lifecycle:
+|||
+||| publish
+|||     ↓
+||| current → retired
+|||     ↓
+||| publish new snapshot
+|||     ↓
+||| reclaim old generations
+|||
+public export
+record CombinedSnapshotState a where
+  constructor MkCombinedSnapshotState
+  currentsnapshot  : SnapshotState a
+  retiredsnapshots : List (RetiredSnapshot a)
+  readerstate      : SortedMap ThreadId ReaderState
+
+--------------------------------------------------------------------------------
 --          ManagedService
 --------------------------------------------------------------------------------
 
@@ -416,9 +488,10 @@ record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
 --------------------------------------------------------------------------------
 
 ||| Concurrent LSM-style vector built from:
-||| - Thread-local mutation logs
-||| - Immutable RRB snapshots
-||| - Continuous background rebuild
+||| - Per-thread mutation state.
+||| - Immutable snapshot generations.
+||| - Background rebuild service.
+||| - Generation-based reclamation.
 |||
 ||| Write path:
 |||
@@ -443,22 +516,26 @@ record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
 ||| Build snapshot
 |||        ↓
 ||| Publish snapshot
+|||        ↓
+||| Retire previous snapshot
+|||        ↓
+||| Reclaim old generations
 |||
 ||| Fields:
-||| - buffers    <-> Thread registry
-||| - tree       <-> Current immutable snapshot
-||| - generation <-> Monotonically increasing snapshot version
-||| - rebuilder  <-> Background rebuild service
+||| - buffers               <-> Thread-local mutation state
+||| - combinedsnapshotstate <-> Published snapshot + retired snapshots + reader tracking
+||| - rebuilder             <-> Background rebuild service
 |||
 ||| Properties:
-||| - O(1) amortized writes.
-||| - Continuous rebuilding.
-||| - No stop-the-world pauses.
-||| - Read-stable snapshots.
+||| - O(1) amortized writes
+||| - Read-stable immutable snapshots
+||| - No stop-the-world pauses
+||| - Safe generation-based reclamation
+||| - Deterministic rebuild ordering
 |||
 public export
 record LSMRRBVector s e a where
   constructor MkLSMRRBVector
-  buffers    : Ref s (SortedMap ThreadId (ThreadContext a))
-  snapshot   : Ref s (SnapshotState a)
-  rebuilder  : ManagedService e RebuildRequest RebuildResponse
+  buffers               : Ref s (SortedMap ThreadId (ThreadContext a))
+  combinedsnapshotstate : Ref s (CombinedSnapshotState a)
+  rebuilder             : ManagedService e RebuildRequest RebuildResponse
