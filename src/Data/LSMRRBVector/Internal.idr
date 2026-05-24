@@ -24,6 +24,38 @@ import System.Posix.Timer.Prim
 %language ElabReflection
 
 --------------------------------------------------------------------------------
+--          Generation
+--------------------------------------------------------------------------------
+
+||| Snapshot generation identifier.
+|||
+||| Represents the logical version of the currently published
+||| immutable snapshot.
+|||
+||| Properties:
+||| - Monotonically increasing.
+||| - Incremented only after successful publication.
+||| - Readers may compare generations to detect snapshot changes.
+|||
+||| Notes:
+||| - Does not encode time.
+||| - Exists purely for ordering and visibility.
+|||
+public export
+Generation : Type
+Generation = Nat
+
+--------------------------------------------------------------------------------
+--          ThreadId
+--------------------------------------------------------------------------------
+
+||| A wrapper over Int for thread ids.
+|||
+public export
+ThreadId : Type
+ThreadId = Int
+
+--------------------------------------------------------------------------------
 --          Buffered Operations
 --------------------------------------------------------------------------------
 
@@ -177,9 +209,9 @@ record WriteBuffers a where
 ||| - buffers  <-> Thread-owned double-buffer state
 |||
 ||| Properties:
-||| - Exclusive ownership.
-||| - No sharing.
-||| - Lock-free mutation path.
+||| - Per-thread logical ownership.
+||| - Shared registry storage.
+||| - Low-contention write path.
 |||
 public export
 record ThreadContext a where
@@ -232,7 +264,8 @@ data RebuildState
 |||
 ||| Trigger:
 ||| - Indicates new buffered work exists.
-||| - Multiple notifications may be coalesced.
+||| - Marks rebuild work as pending.
+||| - Does not initiate rebuild.
 |||
 ||| Flush:
 ||| - Forces all pending writes into a published snapshot.
@@ -266,7 +299,23 @@ data RebuildRequest
 public export
 RebuildResponse : RebuildRequest -> Type
 RebuildResponse Trigger = ()
-RebuildResponse Flush   = ()
+RebuildResponse Flush   = Generation
+
+--------------------------------------------------------------------------------
+--          Rebuild Failure
+--------------------------------------------------------------------------------
+
+||| Failure encountered during rebuild.
+|||
+||| Failures are persisted into service state so callers can observe rebuild health.
+|||
+public export
+data RebuildFailure
+  = SnapshotReadFailure String
+  | SnapshotPublishFailure String
+  | ReplayFailure String
+
+%runElab derive "RebuildFailure" [Show,Eq]
 
 --------------------------------------------------------------------------------
 --          Rebuild Service State
@@ -282,9 +331,9 @@ RebuildResponse Flush   = ()
 public export
 record RebuildServiceState where
   constructor MkRebuildServiceState
-  rebuildphase      : RebuildState
-  rebuildgeneration : Nat
-  rebuildpending    : Bool
+  rebuildphase   : RebuildState
+  rebuildpending : Bool
+  rebuildfailure : Maybe RebuildFailure
 
 %runElab derive "RebuildServiceState" [Show]
 
@@ -310,39 +359,6 @@ public export
 data Registration a
   = Existing a
   | New a
-
---------------------------------------------------------------------------------
---          Generation
---------------------------------------------------------------------------------
-
-||| Snapshot generation identifier.
-|||
-||| Represents the logical version of the currently published
-||| immutable snapshot.
-|||
-||| Properties:
-||| - Monotonically increasing.
-||| - Incremented only after successful publication.
-||| - Readers may compare generations to detect snapshot changes.
-|||
-||| Notes:
-||| - Does not encode time.
-||| - Exists purely for ordering and visibility.
-|||
-public export
-Generation : Type
-Generation = Nat
-
---------------------------------------------------------------------------------
---          ThreadId
---------------------------------------------------------------------------------
-
-||| A wrapper over Int for thread ids.
-|||
-public export
-ThreadId : Type
-ThreadId = Int
-
 
 --------------------------------------------------------------------------------
 --          Snapshot State

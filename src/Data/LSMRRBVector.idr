@@ -65,8 +65,8 @@ initialRebuildServiceState : RebuildServiceState
 initialRebuildServiceState =
   MkRebuildServiceState
     Sleeping
-    0
     False
+    Nothing
 
 --------------------------------------------------------------------------------
 --          Registering Threads
@@ -156,35 +156,19 @@ enqueueOperation regref tid op t =
          Left err   =>
            (assert_total $ idris_crash "Data.LSMRRBVector.enqueueOperation: \{show err}") # t
          Right now' =>
-           casmod1 regref (\m =>
-                            case lookup tid m of
-                              Nothing  =>
-                                let ctx   = MkThreadContext
-                                              tid
-                                              0
-                                              emptyWriteBuffers
-                                    entry = MkEntry
-                                              op
-                                              now'
-                                              tid
-                                              ctx.sequence
-                                    ctx'  = { sequence := S ctx.sequence
-                                            , buffers  :=
-                                                writeOperation ctx.buffers entry
-                                            } ctx
-                                  in insert tid ctx' m
-                              Just ctx =>
-                                let entry = MkEntry
-                                              op
-                                              now'
-                                              tid
-                                              ctx.sequence
-                                    ctx'  = { sequence := S ctx.sequence
-                                            , buffers  :=
-                                                writeOperation ctx.buffers entry
-                                            } ctx
-                                  in insert tid ctx' m
-                          ) t
+           let ctx # t := registerThread regref tid t
+             in casmod1 regref (\m =>
+                                 let entry = MkEntry
+                                               op
+                                               now'
+                                               tid
+                                               ctx.sequence
+                                     ctx'  = { sequence := S ctx.sequence
+                                             , buffers  :=
+                                                 writeOperation ctx.buffers entry
+                                             } ctx
+                                   in update (\_ => Just ctx') tid m
+                               ) t
   where
     grabTime : Elin World [Errno] (IClock CLOCK_REALTIME)
     grabTime = getTime CLOCK_REALTIME
@@ -419,37 +403,36 @@ handleRebuildRequest  :  Ord (Entry a)
                       -> RebuildServiceState
                       -> (req : RebuildRequest)
                       -> Async e [] (RebuildServiceState, RebuildResponse req)
-handleRebuildRequest buffers snapshot st Trigger = do
-  let st1     = { rebuildphase := RotatingBuffers
-                , rebuildpending := True
-                } st
-  frozen      <- liftIO (runIO (rotateAllBuffers buffers))
-  let st2     = { rebuildphase := CollectingEntries
-                } st1
-      entries = collectEntries frozen
-      st3     = { rebuildphase := SortingEntries
-                } st2
-      sorted  = sortEntries entries
-      st4     = { rebuildphase := ApplyingOperations
-                } st3
-  oldsnapshot <- liftIO (runIO (read1 snapshot))
-  let rebuilt = replayEntries sorted oldsnapshot.tree
-      st5     = { rebuildphase := PublishingSnapshot
-                } st4
-  liftIO (runIO (publishSnapshot snapshot rebuilt))
+handleRebuildRequest buffers snapshot st Trigger =
   pure
-    ( { rebuildphase := Sleeping
-      , rebuildpending := False
-      , rebuildgeneration :=
-          S st.rebuildgeneration
-      } st5
+    ( { rebuildpending := True } st
     , ()
     )
-handleRebuildRequest buffers snapshot st Flush   =
-  handleRebuildRequest buffers
-                       snapshot
-                       st
-                       Trigger
+handleRebuildRequest buffers snapshot st Flush   = do
+  let st1                       = { rebuildphase := RotatingBuffers
+                                  } st
+  frozen                        <- liftIO (runIO (rotateAllBuffers buffers))
+  let st2                       = { rebuildphase := CollectingEntries
+                                  } st1
+      entries                   = collectEntries frozen
+      st3                       = { rebuildphase := SortingEntries
+                                  } st2
+      sorted                    = sortEntries entries
+      st4                       = { rebuildphase := ApplyingOperations
+                                  } st3
+  oldsnapshot                   <- liftIO (runIO (read1 snapshot))
+  let rebuilt                   = replayEntries sorted oldsnapshot.tree
+      st5 : RebuildServiceState = { rebuildphase := PublishingSnapshot
+                                  } st4
+  liftIO (runIO (publishSnapshot snapshot rebuilt))
+  newsnapshot                   <- liftIO (runIO (read1 snapshot))
+  pure
+    ( MkRebuildServiceState
+        Sleeping
+        False
+        Nothing
+    , newsnapshot.generation
+    )
 
 --------------------------------------------------------------------------------
 --          Spawn Rebuilder
