@@ -236,10 +236,6 @@ record ThreadContext a where
 |||      ↓
 ||| SortingEntries
 |||      ↓
-||| ApplyingOperations
-|||      ↓
-||| BuildingSnapshot
-|||      ↓
 ||| PublishingSnapshot
 |||      ↓
 ||| Sleeping
@@ -250,8 +246,6 @@ data RebuildState
   | RotatingBuffers
   | CollectingEntries
   | SortingEntries
-  | ApplyingOperations
-  | BuildingSnapshot
   | PublishingSnapshot
 
 %runElab derive "RebuildState" [Show,Eq]
@@ -497,11 +491,13 @@ record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
 |||
 ||| Thread
 |||    ↓
+||| Operation
+|||    ↓
+||| Entry
+|||    ↓
 ||| ThreadContext
 |||    ↓
 ||| active buffer
-|||    ↓
-||| Entry append
 |||
 ||| Rebuild path:
 |||

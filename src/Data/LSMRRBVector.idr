@@ -103,24 +103,47 @@ registerThread regref tid t =
 --          Generation Utilities
 --------------------------------------------------------------------------------
 
+||| Announces that a thread has entered a snapshot read section.
+|||
+||| Behavior:
+||| - Registers the generation currently being read.
+||| - Replaces any previous generation announcement.
+|||
+||| Properties:
+||| - O(log n)
+||| - One active generation per thread
+||| - Used by reclamation safety checks
+|||
 export
-enterGeneration :  Ref s (SortedMap ThreadId ReaderState)
+enterGeneration :  Ref s (CombinedSnapshotState a)
                 -> ThreadId
                 -> Generation
                 -> F1' s
-enterGeneration readers tid gen t =
-    casmod1 readers (\readers' =>
-                      insert tid (MkReaderState gen) readers'
-                    ) t
+enterGeneration combinedsnapshotstate tid gen t =
+  casmod1 combinedsnapshotstate (\s =>
+                                  { readerstate $= insert tid (MkReaderState gen)
+                                  } s
+                                ) t
 
+||| Announces that a thread has completed a snapshot read section.
+|||
+||| Behavior:
+||| - Removes thread participation state.
+||| - Indicates thread no longer references a snapshot.
+|||
+||| Properties:
+||| - O(log n)
+||| - Enables reclamation progress
+|||
 export
-leaveGeneration :  Ref s (SortedMap ThreadId ReaderState)
+leaveGeneration :  Ref s (CombinedSnapshotState a)
                 -> ThreadId
                 -> F1' s
-leaveGeneration readers tid t =
-    casmod1 readers (\readers' =>
-                      delete tid readers'
-                    ) t
+leaveGeneration combinedsnapshotstate tid t =
+  casmod1 combinedsnapshotstate (\s =>
+                                  { readerstate $= delete tid
+                                  } s
+                                ) t
 
 ||| Finds oldest active generation.
 |||
@@ -394,6 +417,48 @@ replayEntries es v =
   foldl (\acc, e => applyOperation e.operation acc) v es
 
 --------------------------------------------------------------------------------
+--          Reading
+--------------------------------------------------------------------------------
+
+||| Reads the current immutable snapshot under generation tracking.
+|||
+||| Steps:
+||| - Atomically acquires the currently published snapshot.
+||| - Registers the calling thread as observing that generation.
+||| - Applies the supplied function to the snapshot tree.
+||| - Removes reader participation after evaluation completes.
+|||
+||| Properties:
+||| - Snapshot acquisition and generation announcement occur atomically.
+||| - Readers observe a consistent immutable snapshot.
+||| - Prevents reclamation of snapshots while actively referenced.
+||| - Does not block writers or rebuild activity.
+|||
+||| Notes:
+||| - The supplied function operates on a stable immutable snapshot.
+||| - Concurrent writes or publications do not affect the observed tree.
+||| - Reader registration exists only for the duration of this operation.
+|||
+||| Complexity:
+||| - O(log n) for reader registration/removal.
+||| - Snapshot access itself is O(1).
+|||
+readSnapshot :  LSMRRBVector World e a
+             -> ThreadId
+             -> (RRBVector a -> b)
+             -> F1 World b
+readSnapshot rrbvector tid f t =
+  let snapshot # t := casupdate1 rrbvector.combinedsnapshotstate (\s =>
+                                                                   ( { readerstate $= insert tid (MkReaderState s.currentsnapshot.generation)
+                                                                     } s
+                                                                   , s.currentsnapshot
+                                                                   )
+                                                                 ) t
+      result       := f snapshot.tree
+      ()       # t := leaveGeneration rrbvector.combinedsnapshotstate tid t
+    in result # t
+
+--------------------------------------------------------------------------------
 --          Publication
 --------------------------------------------------------------------------------
 
@@ -411,21 +476,18 @@ replayEntries es v =
 |||
 export
 publishSnapshot :  Ref s (CombinedSnapshotState a)
-                -> RRBVector a
-                -> F1' s
-publishSnapshot combinedsnapshotstateref new t =
-  casmod1 combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers) =>
-                                     MkCombinedSnapshotState ( { generation :=
-                                                                   S snapshot.generation
-                                                               , tree := new
-                                                               } snapshot
-                                                             )
-                                                             ( ( MkRetiredSnapshot snapshot.generation
-                                                                                   snapshot.tree
-                                                               ) :: retired
-                                                             )
-                                                             readers
-                                   ) t
+                -> List (Entry a)
+                -> F1 s Generation
+publishSnapshot combinedsnapshotstateref entries t =
+  casupdate1 combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers) =>
+                                        let rebuilt   = replayEntries entries snapshot.tree
+                                            newgen    = S snapshot.generation
+                                            snapshot' = MkSnapshotState newgen rebuilt
+                                            retired'  = MkRetiredSnapshot snapshot.generation snapshot.tree :: retired
+                                          in ( MkCombinedSnapshotState snapshot' retired' readers
+                                             , newgen
+                                             )
+                                      ) t
 
 --------------------------------------------------------------------------------
 --          Reclamation
@@ -496,22 +558,16 @@ handleRebuildRequest buffers combinedsnapshotstate st Flush   = do
                 } st2
       sorted  = sortEntries entries
       st4     : RebuildServiceState
-      st4     = { rebuildphase := ApplyingOperations
+      st4     = { rebuildphase := PublishingSnapshot
                 } st3
-  oldcombinedsnapshotstate <- liftIO (runIO (read1 combinedsnapshotstate))
-  let rebuilt = replayEntries sorted oldcombinedsnapshotstate.currentsnapshot.tree
-      st5     : RebuildServiceState
-      st5     = { rebuildphase := PublishingSnapshot
-                } st4
-  liftIO (runIO (publishSnapshot combinedsnapshotstate rebuilt))
+  generation <- liftIO (runIO (publishSnapshot combinedsnapshotstate sorted))
   liftIO (runIO (reclaimSnapshots combinedsnapshotstate))
-  newcombinedsnapshotstate <- liftIO (runIO (read1 combinedsnapshotstate))
   pure
     ( MkRebuildServiceState
         Sleeping
         False
         Nothing
-    , newcombinedsnapshotstate.currentsnapshot.generation
+    , generation
     )
 
 --------------------------------------------------------------------------------
