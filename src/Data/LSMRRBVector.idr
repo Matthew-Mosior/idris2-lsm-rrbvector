@@ -478,14 +478,14 @@ export covering
 spawnRebuilderService :  Ord (Entry a)
                       => Ref World (SortedMap Int (ThreadContext a))
                       -> Ref World (SnapshotState a)
-                      -> F1 World (Async e [] (Service e [] RebuildRequest RebuildResponse))
-spawnRebuilderService buffers snapshot t =
+                      -> Async e [] (Service e [] RebuildRequest RebuildResponse)
+spawnRebuilderService buffers snapshot =
   service RebuildResponse
           initialRebuildServiceState
           ( handleRebuildRequest
               buffers
               snapshot
-          ) # t
+          )
 
 --------------------------------------------------------------------------------
 --          Creating Log-Structured Merge RRB-Vectors
@@ -498,7 +498,7 @@ empty :  Ord (Entry a)
 empty t =
   let buffers    # t := ref1 Data.SortedMap.empty t
       snapshot   # t := ref1 (MkSnapshotState Z Empty) t
-      rebuilder  # t := spawnRebuilderService buffers snapshot t
+      rebuilder      := spawnRebuilderService buffers snapshot
     in MkLSMRRBVector buffers snapshot (MkManagedService rebuilder) # t
 
 ||| A log-structured merge vector with a single element. O(1)
@@ -509,5 +509,5 @@ singleton :  Ord (Entry a)
 singleton x t =
   let buffers    # t := ref1 Data.SortedMap.empty t
       snapshot   # t := ref1 (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) t
-      rebuilder  # t := spawnRebuilderService buffers snapshot t
+      rebuilder      := spawnRebuilderService buffers snapshot
     in MkLSMRRBVector buffers snapshot (MkManagedService rebuilder) # t
