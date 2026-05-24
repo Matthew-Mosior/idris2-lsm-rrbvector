@@ -409,23 +409,28 @@ handleRebuildRequest buffers snapshot st Trigger =
     , ()
     )
 handleRebuildRequest buffers snapshot st Flush   = do
-  let st1                       = { rebuildphase := RotatingBuffers
-                                  } st
-  frozen                        <- liftIO (runIO (rotateAllBuffers buffers))
-  let st2                       = { rebuildphase := CollectingEntries
-                                  } st1
-      entries                   = collectEntries frozen
-      st3                       = { rebuildphase := SortingEntries
-                                  } st2
-      sorted                    = sortEntries entries
-      st4                       = { rebuildphase := ApplyingOperations
-                                  } st3
-  oldsnapshot                   <- liftIO (runIO (read1 snapshot))
-  let rebuilt                   = replayEntries sorted oldsnapshot.tree
-      st5 : RebuildServiceState = { rebuildphase := PublishingSnapshot
-                                  } st4
+  let st1     : RebuildServiceState
+      st1     = { rebuildphase := RotatingBuffers
+                } st
+  frozen      <- liftIO (runIO (rotateAllBuffers buffers))
+  let st2     : RebuildServiceState
+      st2     = { rebuildphase := CollectingEntries
+                } st1
+      entries = collectEntries frozen
+      st3     : RebuildServiceState
+      st3     = { rebuildphase := SortingEntries
+                } st2
+      sorted  = sortEntries entries
+      st4     : RebuildServiceState
+      st4     = { rebuildphase := ApplyingOperations
+                } st3
+  oldsnapshot <- liftIO (runIO (read1 snapshot))
+  let rebuilt = replayEntries sorted oldsnapshot.tree
+      st5     : RebuildServiceState
+      st5     = { rebuildphase := PublishingSnapshot
+                } st4
   liftIO (runIO (publishSnapshot snapshot rebuilt))
-  newsnapshot                   <- liftIO (runIO (read1 snapshot))
+  newsnapshot <- liftIO (runIO (read1 snapshot))
   pure
     ( MkRebuildServiceState
         Sleeping
