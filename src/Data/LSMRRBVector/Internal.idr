@@ -9,575 +9,440 @@ import Data.Bits
 import Data.List
 import Data.Nat
 import Data.Linear.Ref1
+import Data.RRBVector
+import Data.RRBVector.Internal
 import Data.SortedMap
 import Data.String
 import Derive.Prelude
-import Syntax.T1 as T1
+import IO.Async
+import IO.Async.Service
 import System.Concurrency
-import System.Posix.Time
+import System.Posix.Timer
+import System.Posix.Timer.Prim
 
 %default total
 %language ElabReflection
 
 --------------------------------------------------------------------------------
---          Internal Utility
+--          Buffered Operations
 --------------------------------------------------------------------------------
 
-||| Convenience interface for bitSize that doesn't use an implicit parameter.
-private
-bitSizeOf :  (ty : Type)
-          -> FiniteBits ty
-          => Nat
-bitSizeOf ty = bitSize {a = ty}
-
---------------------------------------------------------------------------------
---          Internals
---------------------------------------------------------------------------------
-
-public export
-Shift : Type
-Shift = Nat
-
-||| The number of bits used per level.
-export
-blockshift : Shift
-blockshift = 4
-
-||| The maximum size of a block.
-export
-blocksize : Nat
-blocksize = integerToNat $ 1 `shiftL` blockshift
-
-||| The mask used to extract the index into the array.
-export
-blockmask : Nat
-blockmask = minus blocksize 1
-
-export
-up :  Shift
-   -> Shift
-up sh = plus sh blockshift
-
-export
-down :  Shift
-     -> Shift
-down sh = minus sh blockshift
-
-export
-radixIndex :  Nat
-           -> Shift
-           -> Nat
-radixIndex i sh = integerToNat ((natToInteger i) `shiftR` sh .&. (natToInteger blockmask))
-
-export
-relaxedRadixIndex :  Array Nat
-                  -> Nat
-                  -> Shift
-                  -> (Nat, Nat)
-relaxedRadixIndex sizes i sh =
-  let guess  = radixIndex i sh -- guess <= idx
-      idx    = loop sizes guess
-      subIdx = case idx == 0 of
-                 True  =>
-                   i
-                 False =>
-                   let idx' = case tryNatToFin $ minus idx 1 of
-                                Nothing    =>
-                                  assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.relaxedRadixIndex: index out of bounds"
-                                Just idx'' =>
-                                  idx''
-                     in minus i (at sizes.arr idx')
-    in (idx, subIdx)
-  where
-    loop :  Array Nat
-         -> Nat
-         -> Nat
-    loop sizes idx =
-      let current = case tryNatToFin idx of
-                      Nothing       =>
-                        assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.relaxedRadixIndex.loop: index out of bounds"
-                      Just idx' =>
-                        at sizes.arr idx' -- idx will always be in range for a well-formed tree
-        in case i < current of
-             True  =>
-               idx
-             False =>
-               assert_total $ loop sizes (plus idx 1)
-
---------------------------------------------------------------------------------
---          Internal Tree Representation
---------------------------------------------------------------------------------
-
-||| An internal tree representation.
-public export
-data Tree a = Balanced (Array (Tree a))
-            | Unbalanced (Array (Tree a)) (Array Nat)
-            | Leaf (Array a)
-
---------------------------------------------------------------------------------
---          Query (Tree)
---------------------------------------------------------------------------------
-
-||| Is the tree empty? O(1)
-private
-null :  Tree a
-     -> Bool
-null (Balanced arr)     =
-  null arr
-null (Unbalanced arr _) =
-  null arr
-null (Leaf arr)         =
-  null arr
-
---------------------------------------------------------------------------------
---          Folds (Tree)
---------------------------------------------------------------------------------
-
-private
-foldl :  (b -> a -> b)
-      -> b
-      -> Tree a
-      -> b
-foldl f acc tree =
-  foldlTree acc tree
-  where
-    foldlTree :  b
-              -> Tree a
-              -> b
-    foldlTree acc' (Balanced arr)     =
-      assert_total $ foldl foldlTree acc' arr
-    foldlTree acc' (Unbalanced arr _) =
-      assert_total $ foldl foldlTree acc' arr
-    foldlTree acc' (Leaf arr)         =
-      assert_total $ foldl f acc' arr
-
-private
-foldr :  (a -> b -> b)
-      -> b
-      -> Tree a
-      -> b
-foldr f acc tree =
-  foldrTree tree acc
-  where
-    foldrTree :  Tree a
-              -> b
-              -> b
-    foldrTree (Balanced arr) acc'     =
-      assert_total $ foldr foldrTree acc' arr
-    foldrTree (Unbalanced arr _) acc' =
-      assert_total $ foldr foldrTree acc' arr
-    foldrTree (Leaf arr) acc'         =
-      assert_total $ foldr f acc' arr
-
---------------------------------------------------------------------------------
---          Creating Lists from Trees
---------------------------------------------------------------------------------
-
-export
-toList :  Tree a
-       -> List a
-toList (Balanced arr)     =
-  assert_total $ concat (map toList (toList arr))
-toList (Unbalanced arr _) =
-  assert_total $ concat (map toList (toList arr))
-toList (Leaf arr)         =
-  toList arr
-
---------------------------------------------------------------------------------
---          Interfaces (Tree)
---------------------------------------------------------------------------------
-
-public export
-Show a => Show (Tree a) where
-  show (Balanced arr)     =
-    assert_total $ "Balanced " ++ show arr
-  show (Unbalanced arr _) =
-    assert_total $ "Unbalanced " ++ show arr
-  show (Leaf arr)         =
-    "Leaf " ++ show arr
-
-public export
-Foldable Tree where
-  foldl f z = Data.LSMRRBVector.Internal.foldl f z
-  foldr f z = Data.LSMRRBVector.Internal.foldr f z
-  toList    = Data.LSMRRBVector.Internal.toList
-  null      = Data.LSMRRBVector.Internal.null
-
-public export
-Eq a => Eq (Tree a) where
-  (Balanced arr1) == (Balanced arr2)         =
-    assert_total $ arr1 == arr2
-  (Unbalanced arr1 _) == (Unbalanced arr2 _) =
-    assert_total $ arr1 == arr2
-  (Leaf arr1) == (Leaf arr2)                 =
-    arr1 == arr2
-  _                        == _              =
-    False
-
-public export
-Ord a => Ord (Tree a) where
-  compare tree1 tree2 =
-    compare (Data.LSMRRBVector.Internal.toList tree1) (Data.LSMRRBVector.Internal.toList tree2)
-
---------------------------------------------------------------------------------
---          Show Utilities (Tree)
---------------------------------------------------------------------------------
-
-public export
-showTreeRep :  Show a
-            => Show (Tree a)
-            => Tree a
-            -> String
-showTreeRep (Balanced trees)     =
-  assert_total $ "Balanced " ++ (show $ toList trees)
-showTreeRep (Unbalanced trees _) =
-  assert_total $ "Unbalanced " ++ (show $ toList trees)
-showTreeRep (Leaf elems)         =
-  assert_total $ "Leaf " ++ (show $ toList elems)
-
---------------------------------------------------------------------------------
---          Tree Utilities
---------------------------------------------------------------------------------
-
-export
-singleton :  a
-          -> Array a
-singleton x =
-  A 1 $ fill 1 x
-
-export
-treeToArray :  Tree a
-            -> Array (Tree a)
-treeToArray (Balanced arr)     =
-  arr
-treeToArray (Unbalanced arr _) =
-  arr
-treeToArray (Leaf _)           =
-  assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.treeToArray: leaf"
-
-export
-treeBalanced :  Tree a
-             -> Bool
-treeBalanced (Balanced _)     =
-  True
-treeBalanced (Unbalanced _ _) =
-  False
-treeBalanced (Leaf _)         =
-  True
-
-||| Computes the size of a tree with shift.
-export
-treeSize :  Shift
-         -> Tree a
-         -> Nat
-treeSize = go 0
-  where
-    go :  Shift
-       -> Shift
-       -> Tree a
-       -> Nat
-    go acc _  (Leaf arr)             =
-      plus acc arr.size
-    go acc _  (Unbalanced arr sizes) =
-      let i = case tryNatToFin $ minus arr.size 1 of
-                Nothing =>
-                  assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.treeSize: index out of bounds"
-                Just i' =>
-                  i'
-        in plus acc (at sizes.arr i)
-    go acc sh (Balanced arr)         =
-      let i  = minus arr.size 1
-          i' = case tryNatToFin i of
-                 Nothing  =>
-                   assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.treeSize: index out of bounds"
-                 Just i'' =>
-                   i''
-        in go (plus acc (mult i (integerToNat (1 `shiftL` sh))))
-              (down sh)
-              (assert_smaller arr (at arr.arr i'))
-
-||| Turns an array into a tree node by computing the sizes of its subtrees.
-||| sh is the shift of the resulting tree.
-export
-computeSizes :  Shift
-             -> Array (Tree a)
-             -> Tree a
-computeSizes sh arr =
-  case isBalanced of
-    True  =>
-      Balanced arr
-    False =>
-      let arrnat = unsafeAlloc arr.size (loop sh 0 0 arr.size (toList arr))
-        in Unbalanced arr arrnat
-  where
-    loop :  (sh,cur,acc,n : Nat)
-         -> List (Tree a)
-         -> WithMArray n Nat (Array Nat)
-    loop sh _   acc n []        r = T1.do
-      res <- unsafeFreeze r
-      pure $ A n res
-    loop sh cur acc n (x :: xs) r =
-      case tryNatToFin cur of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.computeSizes.go: can't convert Nat to Fin"
-        Just cur' =>
-          let acc' = plus acc (treeSize (down sh) x)
-            in T1.do set r cur' acc'
-                     assert_total $ loop sh (S cur) acc' n xs r
-    maxsize : Integer
-    maxsize = 1 `shiftL` sh -- the maximum size of a subtree
-    len : Nat
-    len = arr.size
-    lenM1 : Nat
-    lenM1 = minus len 1
-    isBalanced : Bool
-    isBalanced = go 0
-      where
-        go :  Nat
-           -> Bool
-        go i =
-          let subtree = case tryNatToFin i of
-                          Nothing =>
-                            assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.computeSizes.isBalanced: can't convert Nat to Fin"
-                          Just i' =>
-                            at arr.arr i'
-            in case i < lenM1 of
-                 True  =>
-                   assert_total $ (natToInteger $ treeSize (down sh) subtree) == maxsize && go (plus i 1)
-                 False =>
-                   treeBalanced subtree
-
-export
-countTrailingZeros :  Nat
-                   -> Nat
-countTrailingZeros x =
-  go 0
-  where
-    w : Nat
-    w = bitSizeOf Int
-    go : Nat -> Nat
-    go i =
-      case i >= w of
-        True  =>
-          i
-        False =>
-          case tryNatToFin i of
-            Nothing =>
-              assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.countTrailingZeros: can't convert Nat to Fin"
-            Just i' =>
-              case testBit (the Int (cast x)) i' of
-                True  =>
-                  i
-                False =>
-                  assert_total $ go (plus i 1)
-
-||| Nat log base 2.
-export
-log2 :  Nat
-     -> Nat
-log2 x =
-  let bitSizeMinus1 = minus (bitSizeOf Int) 1
-    in minus bitSizeMinus1 (countLeadingZeros x)
-  where
-    countLeadingZeros : Nat -> Nat
-    countLeadingZeros x =
-      minus (minus w 1) (go (minus w 1))
-      where
-        w : Nat
-        w = bitSizeOf Int
-        go : Nat -> Nat
-        go i =
-          case i < 0 of
-            True  =>
-              i
-            False =>
-              case tryNatToFin i of
-                Nothing =>
-                  assert_total $ idris_crash "Data.RRBVector.Unsized.Internal.log2: can't convert Nat to Fin"
-                Just i' =>
-                  case testBit (the Int (cast x)) i' of
-                    True  =>
-                      i
-                    False =>
-                      assert_total $ go (minus i 1)
-
---------------------------------------------------------------------------------
---          Write Buffer Entries (Entry)
---------------------------------------------------------------------------------
-
-||| A timestamped write entry stored inside WriteBuffers.
+||| Operation represents a deferred vector mutation.
 |||
-||| Each logical mutation to the LSMRRBVector is first converted into an Entry
-||| before being placed into a striped WriteBuffers structure.
+||| Rather than mutating the underlying RRBVector immediately, all user
+||| modifications are first converted into Operations and appended into
+||| thread-indexed shared state.
+|||
+||| Variants:
+||| - Prepend a
+|||   Insert a value at the logical beginning.
+||| - Append a
+|||   Insert a value at the logical end.
+||| - Insert Nat a
+|||   Insert a value at a specified index.
+||| - Delete Nat
+|||   Remove a value at a specified index.
+||| - Update Nat a
+|||   Replace a value at a specified index.
+|||
+||| Role in LSM design:
+||| - Forms the deferred mutation layer.
+||| - Enables batching.
+||| - Prevents writers from mutating snapshots.
+|||
+||| Notes:
+||| Indices are interpreted relative to the visible snapshot together with preceding replayed operations.
+|||
+public export
+data Operation a
+  = Prepend a
+  | Append a
+  | Insert Nat a
+  | Delete Nat
+  | Update Nat a
+
+%runElab derive "Operation" [Show,Eq]
+
+--------------------------------------------------------------------------------
+--          Write Buffer Entries
+--------------------------------------------------------------------------------
+
+||| Entry represents a deferred mutation event.
+|||
+||| Every user write becomes an Entry before entering a thread buffer.
 |||
 ||| Fields:
-||| - value:
-|||   - The actual value being written.
-||| - timestamp:
-|||   - A logical timestamp used to impose a deterministic global ordering
-|||     across concurrent writes.
-|||   - This is expressed using `Tm`, a structured time representation
-|||     (calendar time), rather than a monotonic counter.
+||| - operation <-> Deferred mutation
+||| - timestamp <-> Wall-clock ordering hint
+||| - threadid  <-> Originating thread
+||| - sequence  <-> Monotonic per-thread counter
 |||
-||| Ordering model:
-||| - Entries are ordered during flush by timestamp.
-||| - If two entries share identical timestamps, tie-breaking is implementation
-|||   defined (typically stripe order or stable list order).
+||| Ordering:
+||| - Entries are sorted using (timestamp, threadid, sequence).
+||| - This guarantees deterministic replay even when timestamps collide.
 |||
-||| Role in LSM pipeline:
-||| - Produced at write time (append/prepend).
-||| - Buffered in WriteBuffers.
-||| - Sorted and merged during flush into the RRBVector.
-|||
-||| Note:
-||| - Timestamp is used for merge ordering, not for indexing inside the tree.
-||| - The RRBVector itself remains free of timestamp metadata.
+||| Role in LSM design:
+||| - Unit of deferred work.
+||| - Supports deterministic rebuild.
 |||
 public export
 record Entry a where
   constructor MkEntry
-  value     : a
-  timestamp : Tm
+  operation : Operation a
+  timestamp : IClock CLOCK_REALTIME
+  threadid  : Int
+  sequence  : Nat
 
-%runElab derive "Entry" [Show]
+public export
+Eq a => Eq (Entry a) where
+  (MkEntry op1 ts1 tid1 seq1) == (MkEntry op2 ts2 tid2 seq2) =
+       op1   == op2
+    && ts1   == ts2
+    && tid1  == tid2
+    && seq1  == seq2
+
+public export
+Eq (Entry a) => Ord (Entry a) where
+  compare x y =
+    case compare x.timestamp y.timestamp of
+      LT =>
+        LT
+      GT =>
+        GT
+      EQ =>
+        case compare x.threadid y.threadid of
+          LT =>
+            LT
+          GT =>
+            GT
+          EQ =>
+            compare x.sequence y.sequence
 
 --------------------------------------------------------------------------------
---          Write buffers (WriteBuffers)
+--          Single Buffer
 --------------------------------------------------------------------------------
 
-||| WriteBuffers represent the deferred write layer of an LSM-style vector.
+||| Single append-efficient mutation log.
 |||
-||| Instead of immediately applying mutations to the underlying RRB tree,
-||| writes are first accumulated into in-memory buffers.
+||| Represents one physical mutation buffer.
 |||
-||| This structure is now used in a striped concurrency model:
-||| - Multiple independent WriteBuffers exist (one per stripe).
-||| - Each stripe reduces contention by allowing concurrent writes to
-|||   different buffers without interference.
+public export
+record Buffer a where
+  constructor MkBuffer
+  entries : SnocList (Entry a)
+  length  : Nat
+
+--------------------------------------------------------------------------------
+--          Double Buffered Mutation State
+--------------------------------------------------------------------------------
+
+||| Thread-local double buffered mutation state.
 |||
-||| Each buffer stores timestamped entries:
-||| - prependbuffer : List (Entry a)
-||| - appendbuffer  : SnocList (Entry a)
+||| Writers append only to active.
 |||
-||| Directional buffers:
-||| - prependbuffer:
-|||   - Stores logically front-inserted values.
-||| - appendbuffer:
-|||   - Stores logically back-appended values.
+||| During rebuild:
+||| - active ↔ frozen
 |||
-||| Length fields:
-||| - prependlen / appendlen track buffer sizes explicitly to avoid O(n)
-||| - recomputation and to support deterministic flush thresholds.
+||| After rotation:
+||| - Writers immediately continue using a fresh active buffer.
+||| - Rebuild processes frozen asynchronously.
 |||
-||| Invariant:
-||| - prependlen == length prependbuffer
-||| - appendlen  == length appendbuffer
+||| Layout:
+||| - active: Buffer currently receiving writes
+||| - frozen: Snapshot of buffered writes currently under rebuild
 |||
-||| Concurrency model:
-||| - Each WriteBuffers instance is protected by a Mutex at the LSM level.
-||| - Multiple stripes may be written concurrently.
-||| - Each buffer is only mutated inside a controlled critical section.
-|||
-||| Flush policy:
-||| - When a buffer exceeds a configured block size (e.g. 16 entries),
-|||   it becomes eligible for flushing.
-||| - Flushing is performed by a dedicated thread or coordinated flush path
-|||   under a global LSMRRBVector mutex.
-|||
-||| Merge semantics:
-||| - During flush, entries from all stripes are collected.
-||| - Entries are ordered using their timestamp (Tm).
-||| - Ordered entries are then merged into the RRBVector.
+||| Properties:
+||| - O(1) amortized append.
+||| - No stop-the-world pauses.
+||| - Continuous snapshot construction.
 |||
 public export
 record WriteBuffers a where
   constructor MkWriteBuffers
-  prependbuffer : List a
-  prependlen    : Nat
-  appendbuffer  : SnocList a
-  appendlen     : Nat
-  
-%runElab derive "WriteBuffers" [Show]
+  active : Buffer a
+  frozen : Buffer a
 
 --------------------------------------------------------------------------------
---          Relaxed Radix Balanced Vector (RRBVector)
+--          Thread Context
 --------------------------------------------------------------------------------
 
-||| RRBVector is the immutable core data structure representing a relaxed
-||| radix balanced vector.
+||| ThreadContext stores per-thread mutation state.
 |||
-||| This is the "stable snapshot" layer of the LSM design. Once writes are
-||| flushed from WriteBuffers, they are materialized into this structure.
+||| Ownership:
+||| - One ThreadContext exists per registered thread.
 |||
 ||| Fields:
-||| - size  : Total number of elements stored in the tree.
-||| - shift : The current tree height indicator (used for radix indexing).
-|||           It determines how many levels of branching exist in the tree.
-||| - tree  : The actual RRB tree structure storing elements in a
-|||           balanced, indexed layout with relaxed constraints for efficient
-|||           concatenation and updates.
+||| - threadid <-> Unique thread identifier
+||| - sequence <-> Monotonically increasing local counter used for deterministic ordering
+||| - buffers  <-> Thread-owned double-buffer state
 |||
 ||| Properties:
-||| - Supports O(log n) indexed access.
-||| - Supports efficient concatenation compared to strict vectors.
-||| - Maintains balance via relaxed block sizes rather than strict fullness.
-|||
-||| Role in LSM design:
-||| - Serves as the stable read snapshot.
-||| - Updated only during flush/rebuild operations.
-||| - Replaced atomically under a Mutex (not CAS).
-|||
-||| Concurrency model:
-||| - Protected by LSMRRBVector-level Mutex.
-||| - Reads are lock-free (snapshot reads).
-||| - Writes never mutate it directly.
-||| - Flush operations create a new RRBVector and swap it under lock.
-|||
-||| Consistency model:
-||| - Readers always observe a consistent snapshot.
-||| - Buffered writes may not be visible until next flush.
+||| - Exclusive ownership.
+||| - No sharing.
+||| - Lock-free mutation path.
 |||
 public export
-data RRBVector a = Root Nat   -- size
-                        Shift -- shift (blockshift * height)
-                        (Tree a)
-                 | Empty
-  
-%runElab derive "RRBVector" [Show]
+record ThreadContext a where
+  constructor MkThreadContext
+  threadid : Int
+  sequence : Nat
+  buffers  : WriteBuffers a
 
 --------------------------------------------------------------------------------
---          Log-Structured Merge RRB Vectors (LSMRRBVector)
+--          Background Rebuild State
 --------------------------------------------------------------------------------
 
-||| LSMRRBVector is a concurrent LSM-style vector backed by an RRB vector.
-||| It separates write buffering from vector maintenance to reduce contention.
+||| RebuildState represents rebuild thread progress.
 |||
-||| Each thread is associated with exactly one WriteBuffers instance,
-||| stored in a global registry protected by a dedicated Mutex.
+||| Lifecycle:
 |||
-||| The `buffers` field contains:
-||| - A Mutex protecting structural updates to the registry.
-||| - A Ref to a Map from ThreadId → WriteBuffers.
-|||
-||| This registry is used for:
-||| - Thread registration (ensuring 1:1 ThreadId → buffer ownership).
-||| - Buffer lookup during initialization or recovery.
-||| - Flush coordination across threads.
-|||
-||| The `vector` field contains:
-||| - A Mutex protecting updates to the underlying RRBVector.
-||| - A Ref to the main RRB vector structure.
-|||
-||| This vector is updated only during flush/compaction phases where
-||| thread-local buffers are merged into the global structure.
-|||
-||| Concurrency model:
-||| - Writes go to thread-owned buffers (not directly to this structure).
-||| - Buffers mutex protects registry integrity.
-||| - Tree mutex protects structural updates during flush/merge.
+||| Sleeping
+|||      ↓
+||| RotatingBuffers
+|||      ↓
+||| CollectingEntries
+|||      ↓
+||| SortingEntries
+|||      ↓
+||| ApplyingOperations
+|||      ↓
+||| BuildingSnapshot
+|||      ↓
+||| PublishingSnapshot
+|||      ↓
+||| Sleeping
 |||
 public export
-record LSMRRBVector s a where
+data RebuildState
+  = Sleeping
+  | RotatingBuffers
+  | CollectingEntries
+  | SortingEntries
+  | ApplyingOperations
+  | BuildingSnapshot
+  | PublishingSnapshot
+
+%runElab derive "RebuildState" [Show,Eq]
+
+--------------------------------------------------------------------------------
+--          Rebuild Service Messages
+--------------------------------------------------------------------------------
+
+||| Requests sent to the rebuild service.
+|||
+||| Trigger:
+||| - Indicates new buffered work exists.
+||| - Multiple notifications may be coalesced.
+|||
+||| Flush:
+||| - Forces all pending writes into a published snapshot.
+|||
+public export
+data RebuildRequest
+  = Trigger
+  | Flush
+
+%runElab derive "RebuildRequest" [Show,Eq]
+
+--------------------------------------------------------------------------------
+--          Rebuild Service Responses
+--------------------------------------------------------------------------------
+
+||| Response produced by the rebuild service.
+|||
+||| Trigger:
+||| - Acknowledges notification that buffered work exists.
+||| - Does not imply that a rebuild occurred.
+||| - Multiple Trigger requests may be coalesced.
+|||
+||| Flush:
+||| - Indicates that all currently buffered writes have been incorporated into a published snapshot.
+|||
+||| Notes:
+||| - Responses currently contain no payload.
+||| - Dependent typing preserves request/response correspondence.
+||| - Future extensions may return rebuild metrics or generation numbers.
+|||
+public export
+RebuildResponse : RebuildRequest -> Type
+RebuildResponse Trigger = ()
+RebuildResponse Flush   = ()
+
+--------------------------------------------------------------------------------
+--          Rebuild Service State
+--------------------------------------------------------------------------------
+
+||| Internal state owned exclusively by the rebuild service.
+|||
+||| Properties:
+||| - Exists only inside rebuilder.
+||| - Sequentially updated.
+||| - Never shared.
+|||
+public export
+record RebuildServiceState where
+  constructor MkRebuildServiceState
+  rebuildphase      : RebuildState
+  rebuildgeneration : Nat
+  rebuildpending    : Bool
+
+%runElab derive "RebuildServiceState" [Show]
+
+--------------------------------------------------------------------------------
+--          Registration
+--------------------------------------------------------------------------------
+
+||| Result of thread registration lookup.
+|||
+||| Existing:
+||| - Thread already has registered state.
+||| - Reuses existing ThreadContext.
+|||
+||| New:
+||| - Thread was not previously registered.
+||| - Requires creation and insertion of ThreadContext.
+|||
+||| Notes:
+||| - Distinguishes allocation from lookup.
+||| - Avoids duplicate registration logic.
+|||
+public export
+data Registration a
+  = Existing a
+  | New a
+
+--------------------------------------------------------------------------------
+--          Generation
+--------------------------------------------------------------------------------
+
+||| Snapshot generation identifier.
+|||
+||| Represents the logical version of the currently published
+||| immutable snapshot.
+|||
+||| Properties:
+||| - Monotonically increasing.
+||| - Incremented only after successful publication.
+||| - Readers may compare generations to detect snapshot changes.
+|||
+||| Notes:
+||| - Does not encode time.
+||| - Exists purely for ordering and visibility.
+|||
+public export
+Generation : Type
+Generation = Nat
+
+--------------------------------------------------------------------------------
+--          ThreadId
+--------------------------------------------------------------------------------
+
+||| A wrapper over Int for thread ids.
+|||
+public export
+ThreadId : Type
+ThreadId = Int
+
+
+--------------------------------------------------------------------------------
+--          Snapshot State
+--------------------------------------------------------------------------------
+
+||| Immutable published snapshot state.
+|||
+||| Represents the currently visible version of the vector.
+|||
+||| Fields:
+||| - generation <-> Monotonic snapshot version identifier
+||| - tree       <-> Immutable published RRB snapshot
+|||
+||| Publication properties:
+||| - Tree and generation are published atomically.
+||| - Readers always observe a consistent snapshot pair.
+||| - Eliminates visibility races between tree updates and generation updates.
+|||
+||| Lifecycle:
+|||
+||| rebuild
+|||     ↓
+||| new snapshot tree
+|||     ↓
+||| increment generation
+|||     ↓
+||| atomic publication
+|||     ↓
+||| visible to readers
+|||
+||| Notes:
+||| - SnapshotState is immutable once constructed.
+||| - Publication occurs by replacing the whole record.
+|||
+public export
+record SnapshotState a where
+  constructor MkSnapshotState
+  generation : Generation
+  tree       : RRBVector a
+
+--------------------------------------------------------------------------------
+--          ManagedService
+--------------------------------------------------------------------------------
+
+||| A managed effectful resource that can be started inside Async,
+||| but stored purely in data structures.
+|||
+public export
+record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
+  constructor MkManagedService
+  run : Async e [] (Service e [] req resp)
+
+--------------------------------------------------------------------------------
+--          Log Structured Merge RRB Vector
+--------------------------------------------------------------------------------
+
+||| Concurrent LSM-style vector built from:
+||| - Thread-local mutation logs
+||| - Immutable RRB snapshots
+||| - Continuous background rebuild
+|||
+||| Write path:
+|||
+||| Thread
+|||    ↓
+||| ThreadContext
+|||    ↓
+||| active buffer
+|||    ↓
+||| Entry append
+|||
+||| Rebuild path:
+|||
+||| Rotate active/frozen
+|||        ↓
+||| Collect frozen buffers
+|||        ↓
+||| Sort Entries
+|||        ↓
+||| Apply Operations
+|||        ↓
+||| Build snapshot
+|||        ↓
+||| Publish snapshot
+|||
+||| Fields:
+||| - buffers    <-> Thread registry
+||| - tree       <-> Current immutable snapshot
+||| - generation <-> Monotonically increasing snapshot version
+||| - rebuilder  <-> Background rebuild service
+|||
+||| Properties:
+||| - O(1) amortized writes.
+||| - Continuous rebuilding.
+||| - No stop-the-world pauses.
+||| - Read-stable snapshots.
+|||
+public export
+record LSMRRBVector s e a where
   constructor MkLSMRRBVector
-  buffers : (Mutex, Ref s (Maybe (SortedMap Int (WriteBuffers a))))
-  vector  : (Mutex, Ref s (RRBVector a))
+  buffers    : Ref s (SortedMap ThreadId (ThreadContext a))
+  snapshot   : Ref s (SnapshotState a)
+  rebuilder  : ManagedService e RebuildRequest RebuildResponse

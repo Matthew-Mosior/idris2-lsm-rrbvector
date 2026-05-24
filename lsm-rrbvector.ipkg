@@ -7,9 +7,11 @@ version   = 0.1.0
 sourcedir = "src"
 depends   = base
           , array
-          , bytestring
+          , async
           , elab-util
           , posix
           , ref1
 modules   = Data.LSMRRBVector
           , Data.LSMRRBVector.Internal
+          , Data.RRBVector
+          , Data.RRBVector.Internal
