@@ -326,11 +326,22 @@ export
 triggerRebuild :  LSMRRBVector s e a
                -> F1 s (Async e [] ())
 triggerRebuild v t =
-  let action : Async e [] ()
-      action = do
-        svc <- v.rebuilder.run
-        send svc Trigger
-    in action # t
+  let shouldsend # t := casupdate1 v.rebuildscheduled (\scheduled =>
+                                                        case scheduled of
+                                                          True  =>
+                                                            (True, False)
+                                                          False =>
+                                                            (True, True)
+                                                      ) t
+    in case shouldsend of
+         True  =>
+           let action : Async e [] ()
+               action = do
+                 svc <- v.rebuilder.run
+                 send svc Trigger
+             in action # t
+         False =>
+           pure () # t
 
 --------------------------------------------------------------------------------
 --          Buffer Rotation
@@ -687,56 +698,153 @@ reclaimSnapshots combinedsnapshotstate t =
                                 ) t
 
 --------------------------------------------------------------------------------
+--          Single Rebuild Cycle
+--------------------------------------------------------------------------------
+
+||| Executes one rebuild pass.
+|||
+||| Steps:
+||| - Rotate all active buffers.
+||| - Collect extracted entries.
+||| - Sort entries deterministically.
+||| - Publish rebuilt snapshot.
+||| - Reclaim retired snapshots.
+|||
+||| Returns:
+||| - Generation produced by publication.
+||| - Whether any entries were processed.
+|||
+||| Notes:
+||| - Performs exactly one ownership-transfer cycle.
+||| - Does not guarantee complete draining.
+|||
+export covering
+rebuildOnce :  Ord (Entry a)
+            => Ref World (SortedMap Int (ThreadContext a))
+            -> Ref World (CombinedSnapshotState a)
+            -> RebuildServiceState
+            -> Async e [] (RebuildServiceState, Generation, Bool)
+rebuildOnce buffers combinedsnapshotstate st = do
+  -- RotatingBuffers
+  let st1        : RebuildServiceState
+      st1        = { rebuildphase := RotatingBuffers } st
+  extracted      <- liftIO (runIO (rotateAllBuffers buffers))
+  -- CollectingEntries
+  let st2        : RebuildServiceState
+      st2        = { rebuildphase := CollectingEntries } st1
+      entries    = collectEntries extracted
+  case isNil entries of
+    True  => do
+      -- We must read the current generation so callers stay consistent.
+      cs <- liftIO (runIO (read1 combinedsnapshotstate))
+      pure (st2, cs.currentsnapshot.generation, False)
+    False => do
+      -- SortingEntries
+      let st3    : RebuildServiceState
+          st3    = { rebuildphase := SortingEntries } st2
+          sorted = sortEntries entries
+      -- PublishingSnapshot
+      let st4    : RebuildServiceState
+          st4    = { rebuildphase := PublishingSnapshot } st3
+      generation <- liftIO (runIO (publishSnapshot combinedsnapshotstate sorted))
+      liftIO (runIO (reclaimSnapshots combinedsnapshotstate))
+      pure (st4, generation, True)
+
+--------------------------------------------------------------------------------
+--          Flush Until Empty
+--------------------------------------------------------------------------------
+
+||| Repeatedly performs rebuild cycles until no buffered work remains.
+|||
+||| Properties:
+||| - Ensures Flush observes all writes that arrived before completion.
+||| - Writers may continue concurrently.
+||| - Terminates once a rotation extracts no entries.
+|||
+||| Returns:
+||| - Final rebuild state.
+||| - Last published generation.
+|||
+export covering
+flushUntilEmpty :  Ord (Entry a)
+                => Ref World (SortedMap Int (ThreadContext a))
+                -> Ref World (CombinedSnapshotState a)
+                -> RebuildServiceState
+                -> Async e [] (RebuildServiceState, Generation)
+flushUntilEmpty buffers combinedsnapshotstate st =
+  let loop :  RebuildServiceState
+           -> Generation
+           -> Async e [] (RebuildServiceState, Generation)
+      loop st lastgen = do
+        (st', gen, hadentries) <- rebuildOnce buffers combinedsnapshotstate st
+        case hadentries of
+          True  =>
+            loop st' gen
+          False =>
+            pure (st', gen)
+    in loop st 0
+
+--------------------------------------------------------------------------------
 --          Rebuilder Service
 --------------------------------------------------------------------------------
 
-||| Processes a rebuild request and updates rebuild state.
+||| Processes a rebuild request issued by the LSM write system.
+|||
+||| This service is responsible for advancing the immutable snapshot from the accumulated thread-local mutation buffers.
+|||
+||| Two modes of operation exist:
 |||
 ||| Trigger:
-||| - Marks pending work.
-||| - Starts rebuild if idle.
+||| - Performs at most one rebuild cycle.
+||| - May publish a new snapshot if buffered work exists.
+||| - Intended for incremental background progression.
+||| - Does NOT guarantee that all writes are incorporated.
 |||
 ||| Flush:
-||| - Forces processing of all buffered writes.
-||| - Returns only after publication completes.
+||| - Repeatedly performs rebuild cycles until all buffered writes observed at invocation time are incorporated.
+||| - Guarantees that all prior writes are reflected in the returned snapshot generation.
+||| - May perform multiple rotations and publications internally.
+|||
+||| Concurrency guarantees:
+||| - Writers may continue appending during rebuild.
+||| - Flush only guarantees completeness relative to a quiescent cut of buffer rotation visibility.
+|||
+||| Return values:
+||| - Trigger returns unit acknowledgement.
+||| - Flush returns the final snapshot generation after draining.
+|||
+||| State transitions:
+||| Sleeping → RotatingBuffers → CollectingEntries → SortingEntries → PublishingSnapshot → Sleeping
+|||
+||| Notes:
+||| - Empty rebuild cycles do not advance generation.
+||| - Flush drains until a cycle produces no entries.
+||| - Trigger is a bounded operation, Flush is unbounded (but finite under quiescent assumptions).
 |||
 export covering
-handleRebuildRequest  :  Ord (Entry a)
-                      => Ref World (SortedMap Int (ThreadContext a))
-                      -> Ref World (CombinedSnapshotState a)
-                      -> RebuildServiceState
-                      -> (req : RebuildRequest)
-                      -> Async e [] (RebuildServiceState, RebuildResponse req)
-handleRebuildRequest buffers combinedsnapshotstate st Trigger =
-  pure
-    ( { rebuildpending := True } st
-    , ()
-    )
-handleRebuildRequest buffers combinedsnapshotstate st Flush   = do
-  let st1     : RebuildServiceState
-      st1     = { rebuildphase := RotatingBuffers
-                } st
-  extracted   <- liftIO (runIO (rotateAllBuffers buffers))
-  let st2     : RebuildServiceState
-      st2     = { rebuildphase := CollectingEntries
-                } st1
-      entries = collectEntries extracted
-      st3     : RebuildServiceState
-      st3     = { rebuildphase := SortingEntries
-                } st2
-      sorted  = sortEntries entries
-      st4     : RebuildServiceState
-      st4     = { rebuildphase := PublishingSnapshot
-                } st3
-  generation <- liftIO (runIO (publishSnapshot combinedsnapshotstate sorted))
-  liftIO (runIO (reclaimSnapshots combinedsnapshotstate))
-  pure
-    ( MkRebuildServiceState
-        Sleeping
-        False
-        Nothing
-    , generation
-    )
+handleRebuildRequest :  Ord (Entry a)
+                     => Ref World (SortedMap Int (ThreadContext a))
+                     -> Ref World (CombinedSnapshotState a)
+                     -> Ref World Bool
+                     -> RebuildServiceState
+                     -> (req : RebuildRequest)
+                     -> Async e [] (RebuildServiceState, RebuildResponse req)
+handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Trigger = do
+  (_, _, _) <- rebuildOnce buffers combinedsnapshotstate st
+  liftIO (runIO (casmod1 rebuildscheduled (const False)))
+  let st' = MkRebuildServiceState
+              Sleeping
+              False
+              Nothing
+  pure (st', ())
+handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Flush = do
+  (_, generation) <- flushUntilEmpty buffers combinedsnapshotstate st
+  liftIO (runIO (casmod1 rebuildscheduled (const False)))
+  let st' = MkRebuildServiceState
+              Sleeping
+              False
+              Nothing
+  pure (st', generation)
 
 --------------------------------------------------------------------------------
 --          Spawn Rebuilder
@@ -765,13 +873,15 @@ export covering
 spawnRebuilderService :  Ord (Entry a)
                       => Ref World (SortedMap Int (ThreadContext a))
                       -> Ref World (CombinedSnapshotState a)
+                      -> Ref World Bool
                       -> Async e [] (Service e [] RebuildRequest RebuildResponse)
-spawnRebuilderService buffers combinedsnapshotstate =
+spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled =
   service RebuildResponse
           initialRebuildServiceState
           ( handleRebuildRequest
               buffers
               combinedsnapshotstate
+              rebuildscheduled
           )
 
 --------------------------------------------------------------------------------
@@ -785,8 +895,9 @@ empty :  Ord (Entry a)
 empty t =
   let buffers               # t := ref1 Data.SortedMap.empty t
       combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty) t
-      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate
-    in MkLSMRRBVector buffers combinedsnapshotstate (MkManagedService rebuilder) # t
+      rebuildscheduled      # t := ref1 False t
+      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
+    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
 
 ||| A log-structured merge vector with a single element. O(1)
 export covering
@@ -796,5 +907,6 @@ singleton :  Ord (Entry a)
 singleton x t =
   let buffers               # t := ref1 Data.SortedMap.empty t
       combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty) t
-      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate
-    in MkLSMRRBVector buffers combinedsnapshotstate (MkManagedService rebuilder) # t
+      rebuildscheduled      # t := ref1 False t
+      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
+    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t

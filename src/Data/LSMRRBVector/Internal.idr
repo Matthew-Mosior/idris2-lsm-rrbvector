@@ -513,6 +513,7 @@ record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
 ||| Fields:
 ||| - buffers               <-> Thread-local mutation state
 ||| - combinedsnapshotstate <-> Published snapshot + retired snapshots + reader tracking
+||| - rebuildscheduled      <-> Producer-side scheduling boolean
 ||| - rebuilder             <-> Background rebuild service
 |||
 ||| Properties:
@@ -527,4 +528,5 @@ record LSMRRBVector s e a where
   constructor MkLSMRRBVector
   buffers               : Ref s (SortedMap ThreadId (ThreadContext a))
   combinedsnapshotstate : Ref s (CombinedSnapshotState a)
+  rebuildscheduled      : Ref s Bool
   rebuilder             : ManagedService e RebuildRequest RebuildResponse
