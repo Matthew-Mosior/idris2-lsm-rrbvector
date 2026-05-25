@@ -168,31 +168,24 @@ record Buffer a where
 --          Double Buffered Mutation State
 --------------------------------------------------------------------------------
 
-||| Thread-local double buffered mutation state.
+||| Thread-local mutation state.
 |||
 ||| Writers append only to active.
 |||
 ||| During rebuild:
-||| - active ↔ frozen
-|||
-||| After rotation:
-||| - Writers immediately continue using a fresh active buffer.
-||| - Rebuild processes frozen asynchronously.
-|||
-||| Layout:
-||| - active: Buffer currently receiving writes
-||| - frozen: Snapshot of buffered writes currently under rebuild
+||| - Active buffers are extracted atomically.
+||| - Ownership transfers to the rebuilder.
+||| - Writers immediately continue on a fresh buffer.
 |||
 ||| Properties:
 ||| - O(1) amortized append.
 ||| - No stop-the-world pauses.
-||| - Continuous snapshot construction.
+||| - No shared rebuild ownership.
 |||
 public export
 record WriteBuffers a where
   constructor MkWriteBuffers
   active : Buffer a
-  frozen : Buffer a
 
 --------------------------------------------------------------------------------
 --          Thread Context

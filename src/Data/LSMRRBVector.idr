@@ -49,11 +49,11 @@ emptyBuffer =
 --          Write Buffer Utilities
 --------------------------------------------------------------------------------
 
-||| Empty double-buffer state.
+||| Empty buffer state.
 export
 emptyWriteBuffers : WriteBuffers a
 emptyWriteBuffers =
-  MkWriteBuffers emptyBuffer emptyBuffer
+  MkWriteBuffers emptyBuffer
 
 --------------------------------------------------------------------------------
 --          Rebuild Service Utilities
@@ -191,10 +191,9 @@ export
 writeOperation :  WriteBuffers a
                -> Entry a
                -> WriteBuffers a
-writeOperation (MkWriteBuffers active frozen) e =
+writeOperation (MkWriteBuffers active) e =
   MkWriteBuffers
     (appendEntry active e)
-    frozen
 
 ||| Converts an operation into an Entry and appends it into the owning thread's active mutation buffer.
 |||
@@ -334,37 +333,58 @@ triggerRebuild v t =
 --          Buffer Rotation
 --------------------------------------------------------------------------------
 
-||| Swap active/frozen and clear active.
+||| Extract active buffer ownership for rebuilding.
+|||
+||| Returns:
+||| - Updated thread context with empty active buffer
+||| - Extracted buffer now owned by rebuilder
 |||
 export
 rotateBuffers :  ThreadContext a
-              -> ThreadContext a
+              -> (ThreadContext a, Buffer a)
 rotateBuffers ctx =
-  let bufs = ctx.buffers
-    in { buffers :=
-           MkWriteBuffers
-             emptyBuffer
-             bufs.active
-       } ctx
+  let active = ctx.buffers.active
+      ctx'   = { buffers :=
+                   MkWriteBuffers
+                     emptyBuffer
+               } ctx
+    in (ctx', active) 
 
 --------------------------------------------------------------------------------
 --          Registry Rotation
 --------------------------------------------------------------------------------
 
-||| Rotate every registered thread's buffers.
+||| Atomically extracts active buffers from all registered threads.
 |||
-||| Returns all frozen buffers to rebuild from.
+||| Behavior:
+||| - Replaces every thread's active buffer with an empty buffer.
+||| - Transfers ownership of the previous active buffers to the rebuilder.
+||| - Writers immediately continue appending into fresh active buffers.
+|||
+||| Returns:
+||| - A list of extracted buffers now exclusively owned by the rebuilder.
+|||
+||| Properties:
+||| - Each buffered operation is extracted exactly once.
+||| - Extracted buffers cannot be observed or modified by writers.
+||| - No buffered operations are duplicated or lost.
+||| - Atomic across the entire thread registry.
+||| - O(number of registered threads)
+|||
+||| Notes:
+||| - Extraction performs ownership transfer rather than copying.
+||| - Returned buffers are intended for a single rebuild cycle.
+||| - Once extracted, buffers should be consumed exactly once.
 |||
 export
 rotateAllBuffers :  Ref s (SortedMap ThreadId (ThreadContext a))
                  -> F1 s (List (Buffer a))
 rotateAllBuffers regref t =
   casupdate1 regref (\m =>
-                      let m'      = map rotateBuffers m
-                          frozen' =
-                            map (\ctx => ctx.buffers.frozen)
-                                (values m')
-                        in (m', frozen')
+                      let rotated   = map rotateBuffers m
+                          contexts  = map fst rotated
+                          extracted = map snd (values rotated)
+                        in (contexts, extracted)
                     ) t
 
 --------------------------------------------------------------------------------
@@ -565,11 +585,11 @@ handleRebuildRequest buffers combinedsnapshotstate st Flush   = do
   let st1     : RebuildServiceState
       st1     = { rebuildphase := RotatingBuffers
                 } st
-  frozen      <- liftIO (runIO (rotateAllBuffers buffers))
+  extracted   <- liftIO (runIO (rotateAllBuffers buffers))
   let st2     : RebuildServiceState
       st2     = { rebuildphase := CollectingEntries
                 } st1
-      entries = collectEntries frozen
+      entries = collectEntries extracted
       st3     : RebuildServiceState
       st3     = { rebuildphase := SortingEntries
                 } st2
