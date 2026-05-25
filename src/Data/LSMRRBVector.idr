@@ -205,12 +205,15 @@ writeOperation (MkWriteBuffers active) e =
 ||| - Register thread if necessary.
 ||| - Allocate Entry.
 ||| - Increment sequence counter.
-||| - Update thread registry.
+||| - Append into active write buffer.
+||| - Increment global write pressure.
+||| - Mark rebuild work as pending.
 |||
 ||| Properties:
 ||| - O(log n) registry update.
 ||| - O(1) buffer append.
 ||| - Deterministic replay ordering.
+||| - Adaptive batching pressure is globally visible atomically.
 |||
 export
 enqueueOperation :  Ref World (SortedMap ThreadId (ThreadContext a))
@@ -648,32 +651,71 @@ null rrbvector tid t =
   readSnapshot rrbvector tid Data.RRBVector.null t
 
 --------------------------------------------------------------------------------
+--          Adaptive Batching
+--------------------------------------------------------------------------------
+
+||| Adjusts adaptive batching window according to observed write pressure.
+|||
+||| Rules:
+||| - Pressure above the current window expands the window.
+||| - Pressure below half the current window shrinks the window.
+||| - Window never shrinks below 1.
+|||
+||| Properties:
+||| - Pure deterministic policy function.
+||| - Does not affect correctness.
+||| - Only influences rebuild batching behavior.
+|||
+export
+adjustBatchWindow :  Nat
+                  -> Nat
+                  -> Nat
+adjustBatchWindow pressure window =
+  case pressure > window of
+    True  =>
+      window * 2
+    False =>
+      case pressure < (window `div` 2) of
+        True  =>
+          max 1 (window `div` 2)
+        False =>
+          window
+
+--------------------------------------------------------------------------------
 --          Publication
 --------------------------------------------------------------------------------
 
-||| Atomically publishes a rebuilt snapshot.
+||| Atomically publishes a rebuilt snapshot and advances adaptive batching state.
 |||
 ||| Steps:
-||| - Move current snapshot into retired list.
-||| - Increment generation.
-||| - Publish new current snapshot.
+||| - Replay buffered operations into a rebuilt immutable tree.
+||| - Increment snapshot generation.
+||| - Retire the previous snapshot.
+||| - Reset accumulated write pressure.
+||| - Clear rebuild pending state.
+||| - Adaptively adjust batching window.
 |||
 ||| Properties:
 ||| - Snapshot publication is atomic.
-||| - Previous snapshot becomes reclaimable.
-||| - Readers always observe a consistent state.
+||| - Readers always observe a consistent snapshot/generation pair.
+||| - Adaptive batching state transitions are globally visible atomically.
+||| - Previous snapshots become eligible for reclamation.
+|||
+||| Notes:
+||| - Adaptive batching decisions are based on write pressure observed since the previous successful publication.
 |||
 export
 publishSnapshot :  Ref s (CombinedSnapshotState a)
                 -> List (Entry a)
                 -> F1 s Generation
 publishSnapshot combinedsnapshotstateref entries t =
-  casupdate1 combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending) =>
-                                        let rebuilt   = replayEntries entries snapshot.tree
-                                            newgen    = S snapshot.generation
-                                            snapshot' = MkSnapshotState newgen rebuilt
-                                            retired'  = MkRetiredSnapshot snapshot.generation snapshot.tree :: retired
-                                          in ( MkCombinedSnapshotState snapshot' retired' readers writepressure rebuildpending
+  casupdate1 combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending batchwindow) =>
+                                        let rebuilt    = replayEntries entries snapshot.tree
+                                            newgen     = S snapshot.generation
+                                            snapshot'  = MkSnapshotState newgen rebuilt
+                                            retired'   = MkRetiredSnapshot snapshot.generation snapshot.tree :: retired                      
+                                            nextwindow = adjustBatchWindow writepressure batchwindow
+                                          in ( MkCombinedSnapshotState snapshot' retired' readers 0 False nextwindow
                                              , newgen
                                              )
                                       ) t
@@ -696,7 +738,7 @@ export
 reclaimSnapshots :  Ref s (CombinedSnapshotState a)
                  -> F1' s
 reclaimSnapshots combinedsnapshotstate t =
-  casmod1 combinedsnapshotstate (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending) =>
+  casmod1 combinedsnapshotstate (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending batchwindow) =>
                                   let survivors = case minimumGeneration readers of
                                                     Nothing     =>
                                                       []
@@ -704,7 +746,7 @@ reclaimSnapshots combinedsnapshotstate t =
                                                       filter (\snap =>
                                                                snap.generation >= mingen
                                                              ) retired
-                                    in MkCombinedSnapshotState snapshot survivors readers writepressure rebuildpending
+                                    in MkCombinedSnapshotState snapshot survivors readers writepressure rebuildpending batchwindow
                                 ) t
 
 --------------------------------------------------------------------------------
@@ -759,11 +801,7 @@ rebuildOnce buffers combinedsnapshotstate st = do
           st4    = { rebuildphase := PublishingSnapshot } st3
       generation <- liftIO (runIO (publishSnapshot combinedsnapshotstate sorted))
       liftIO (runIO (reclaimSnapshots combinedsnapshotstate))
-      -- Reset back to idle, but preserve pressure tracking
-      let st5 = { rebuildphase   := Sleeping
-                , rebuildpending := False
-                } st4
-      pure (st5, generation, True)
+      pure (st4, generation, True)
 
 --------------------------------------------------------------------------------
 --          Flush Until Empty
@@ -909,7 +947,7 @@ empty :  Ord (Entry a)
       => F1 World (LSMRRBVector World e a)
 empty t =
   let buffers               # t := ref1 Data.SortedMap.empty t
-      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False) t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False 64) t
       rebuildscheduled      # t := ref1 False t
       rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
@@ -921,7 +959,7 @@ singleton :  Ord (Entry a)
           -> F1 World (LSMRRBVector World e a)
 singleton x t =
   let buffers               # t := ref1 Data.SortedMap.empty t
-      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty 0 False) t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty 0 False 64) t
       rebuildscheduled      # t := ref1 False t
       rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t

@@ -426,24 +426,20 @@ record RetiredSnapshot a where
 --          Combined Snapshot State
 --------------------------------------------------------------------------------
 
-||| Combined snapshot publication and reclamation state.
-|||
-||| This structure is the single globally-atomic CAS-protected state shared between:
-||| - Writers (enqueueOperation)
-||| - Rebuilder (publish + flush)
-||| - Readers (snapshot visibility tracking)
-|||
-||| In addition to snapshot management, it also contains adaptive batching control state.
+||| Combined snapshot publication, reclamation, and batching state.
 |||
 ||| Fields:
 ||| - currentsnapshot: Current published immutable snapshot.
 ||| - retiredsnapshots: Older snapshots awaiting reclamation.
 ||| - readerstate: Active reader generation announcements.
-||| - writePressure: Global counter of buffered write operations.
-||| - rebuildpending: Indicates whether a rebuild has been requested.
+||| - writepressure: Number of writes accumulated since the last rebuild cycle.
+||| - rebuildpending: Indicates whether buffered work exists requiring rebuild.
+||| - batchwindow: Adaptive batching target controlling rebuild granularity.
 |||
-||| Invariant:
-||| - All fields are updated atomically via CAS.
+||| Properties:
+||| - Updated atomically through CAS.
+||| - Shared between readers, writers, and rebuilder.
+||| - Adaptive batching decisions observe a globally consistent state.
 |||
 public export
 record CombinedSnapshotState a where
@@ -453,6 +449,7 @@ record CombinedSnapshotState a where
   readerstate      : SortedMap ThreadId ReaderState
   writepressure    : Nat
   rebuildpending   : Bool
+  batchwindow      : Nat
 
 --------------------------------------------------------------------------------
 --          ManagedService
