@@ -40,6 +40,7 @@ import System.Posix.Timer.Prim
 --------------------------------------------------------------------------------
 
 ||| Empty mutation buffer.
+|||
 export
 emptyBuffer : Buffer a
 emptyBuffer =
@@ -50,6 +51,7 @@ emptyBuffer =
 --------------------------------------------------------------------------------
 
 ||| Empty buffer state.
+|||
 export
 emptyWriteBuffers : WriteBuffers a
 emptyWriteBuffers =
@@ -60,6 +62,7 @@ emptyWriteBuffers =
 --------------------------------------------------------------------------------
 
 ||| Initial rebuild state.
+|||
 export
 initialRebuildServiceState : RebuildServiceState
 initialRebuildServiceState =
@@ -110,9 +113,9 @@ registerThread regref tid t =
 ||| - Replaces any previous generation announcement.
 |||
 ||| Properties:
-||| - O(log n)
-||| - One active generation per thread
-||| - Used by reclamation safety checks
+||| - O(log n).
+||| - One active generation per thread.
+||| - Used by reclamation safety checks.
 |||
 export
 enterGeneration :  Ref s (CombinedSnapshotState a)
@@ -132,8 +135,8 @@ enterGeneration combinedsnapshotstate tid gen t =
 ||| - Indicates thread no longer references a snapshot.
 |||
 ||| Properties:
-||| - O(log n)
-||| - Enables reclamation progress
+||| - O(log n).
+||| - Enables reclamation progress.
 |||
 export
 leaveGeneration :  Ref s (CombinedSnapshotState a)
@@ -152,7 +155,7 @@ leaveGeneration combinedsnapshotstate tid t =
 ||| - Just generation otherwise.
 |||
 ||| Properties:
-||| - O(n)
+||| - O(n).
 |||
 export
 minimumGeneration :  SortedMap ThreadId ReaderState
@@ -238,7 +241,7 @@ enqueueOperation regref tid op t =
     grabTime = getTime CLOCK_REALTIME
 
 --------------------------------------------------------------------------------
---          Operations
+--          Mutation Operations
 --------------------------------------------------------------------------------
 
 ||| Appends a value onto the logical end of the vector.
@@ -494,6 +497,134 @@ readSnapshot rrbvector tid f t =
     readSnapshot' : Elin World [Errno] b
     readSnapshot' =
       bracket (runIO acquire) (\snapshot => runIO (use snapshot)) (\snapshot => runIO (release snapshot))
+
+--------------------------------------------------------------------------------
+--          Read Operations
+--------------------------------------------------------------------------------
+
+||| Converts the current published snapshot into a list.
+|||
+||| Behavior:
+||| - Reads the current immutable snapshot.
+||| - Converts the snapshot contents into a List.
+|||
+||| Properties:
+||| - Observes a consistent snapshot.
+||| - Does not block writers or rebuild activity.
+||| - Reader participation is cleaned up automatically.
+|||
+||| Notes:
+||| - Concurrent writes published after acquisition are not visible.
+|||
+||| Complexity:
+||| - Snapshot acquisition: O(1)
+||| - Conversion: O(n)
+|||
+export
+toList :  LSMRRBVector World e a
+       -> ThreadId
+       -> F1 World (List a)
+toList rrbvector tid t =
+  readSnapshot rrbvector tid Data.RRBVector.toList t
+
+||| Returns the number of elements in the current published snapshot.
+|||
+||| Behavior:
+||| - Reads the current immutable snapshot.
+||| - Returns its logical length.
+|||
+||| Properties:
+||| - Observes a consistent snapshot.
+||| - Does not block writers or rebuild activity.
+||| - Reader participation is cleaned up automatically.
+|||
+||| Notes:
+||| - Concurrent writes published after acquisition are not visible.
+|||
+||| Complexity:
+||| - O(1)
+|||
+export
+length :  LSMRRBVector World e a
+       -> ThreadId
+       -> F1 World Nat
+length rrbvector tid t =
+  readSnapshot rrbvector tid Data.RRBVector.length t
+
+||| Returns the element at a given index.
+|||
+||| Behavior:
+||| - Reads the current immutable snapshot.
+||| - Retrieves the element at the specified index.
+|||
+||| Properties:
+||| - Observes a consistent snapshot.
+||| - Does not block writers or rebuild activity.
+||| - Reader participation is cleaned up automatically.
+|||
+||| Notes:
+||| - Out-of-bounds behavior matches RRBVector.index.
+||| - Concurrent writes published after acquisition are not visible.
+|||
+||| Complexity:
+||| - O(log n)
+|||
+export
+index :  LSMRRBVector World e a
+      -> ThreadId
+      -> Nat
+      -> F1 World a
+index rrbvector tid i t =
+  readSnapshot rrbvector tid (\v => Data.RRBVector.index i v) t
+
+||| Looks up an element by index.
+|||
+||| Behavior:
+||| - Reads the current immutable snapshot.
+||| - Returns Nothing if the index is out of bounds.
+|||
+||| Properties:
+||| - Observes a consistent snapshot.
+||| - Does not block writers or rebuild activity.
+||| - Reader participation is cleaned up automatically.
+|||
+||| Notes:
+||| - Concurrent writes published after acquisition are not visible.
+|||
+||| Complexity:
+||| - O(log n)
+|||
+export
+lookup :  LSMRRBVector World e a
+       -> ThreadId
+       -> Nat
+       -> F1 World (Maybe a)
+lookup rrbvector tid i t =
+  readSnapshot rrbvector tid (\v => Data.RRBVector.lookup i v) t
+
+||| Tests whether the current published snapshot is empty.
+|||
+||| Behavior:
+||| - Reads the current immutable snapshot.
+||| - Returns True when no elements exist.
+|||
+||| Properties:
+||| - Observes a consistent snapshot.
+||| - Does not block writers or rebuild activity.
+||| - Reader participation is cleaned up automatically.
+|||
+||| Notes:
+||| - Concurrent writes published after acquisition are not visible.
+|||
+||| Complexity:
+||| - O(1)
+|||
+export
+null :  LSMRRBVector World e a
+     -> ThreadId
+     -> F1 World Bool
+null rrbvector tid t =
+  readSnapshot rrbvector tid Data.RRBVector.null t
 
 --------------------------------------------------------------------------------
 --          Publication
