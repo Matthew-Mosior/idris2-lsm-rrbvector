@@ -432,6 +432,7 @@ replayEntries es v =
 ||| - Snapshot acquisition and generation announcement occur atomically.
 ||| - Readers observe a consistent immutable snapshot.
 ||| - Prevents reclamation of snapshots while actively referenced.
+||| - Reader cleanup occurs even if evaluation fails or is canceled.
 ||| - Does not block writers or rebuild activity.
 |||
 ||| Notes:
@@ -448,15 +449,31 @@ readSnapshot :  LSMRRBVector World e a
              -> (RRBVector a -> b)
              -> F1 World b
 readSnapshot rrbvector tid f t =
-  let snapshot # t := casupdate1 rrbvector.combinedsnapshotstate (\s =>
-                                                                   ( { readerstate $= insert tid (MkReaderState s.currentsnapshot.generation)
-                                                                     } s
-                                                                   , s.currentsnapshot
-                                                                   )
-                                                                 ) t
-      result       := f snapshot.tree
-      ()       # t := leaveGeneration rrbvector.combinedsnapshotstate tid t
-    in result # t
+  let res # t := ioToF1 (runElinIO readSnapshot') t
+    in case res of
+         Right res' =>
+           res' # t
+         Left err   =>
+           (assert_total $ idris_crash "Data.LSMRRBVector.readSnapshot: \{show err}") # t
+  where
+    acquire : F1 World (SnapshotState a)
+    acquire t =
+      casupdate1 rrbvector.combinedsnapshotstate (\s =>
+                                                   ( { readerstate $= insert tid (MkReaderState s.currentsnapshot.generation)
+                                                     } s
+                                                   , s.currentsnapshot
+                                                   )
+                                                 ) t
+    use :  SnapshotState a
+        -> F1 World b
+    use snapshot t = f snapshot.tree # t
+    release :  SnapshotState a
+            -> F1' World
+    release _ t =
+      leaveGeneration rrbvector.combinedsnapshotstate tid t
+    readSnapshot' : Elin World [Errno] b
+    readSnapshot' =
+      bracket (runIO acquire) (\snapshot => runIO (use snapshot)) (\snapshot => runIO (release snapshot))
 
 --------------------------------------------------------------------------------
 --          Publication
