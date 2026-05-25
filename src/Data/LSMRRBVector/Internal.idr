@@ -308,12 +308,12 @@ data RebuildFailure
 --          Rebuild Service State
 --------------------------------------------------------------------------------
 
-||| Internal state owned exclusively by the rebuild service.
+||| Controls both execution of rebuild cycles and adaptive batching behavior.
 |||
-||| Properties:
-||| - Exists only inside rebuilder.
-||| - Sequentially updated.
-||| - Never shared.
+||| Fields:
+||| - rebuildphase: Current phase of the rebuild pipeline.
+||| - rebuildpending: Indicates whether a rebuild has been scheduled by writers.
+||| - rebuildfailure: Last observed failure in rebuild pipeline, if any.
 |||
 public export
 record RebuildServiceState where
@@ -428,28 +428,22 @@ record RetiredSnapshot a where
 
 ||| Combined snapshot publication and reclamation state.
 |||
-||| Ownership:
-||| - Exclusively modified by publication/reclamation logic.
+||| This structure is the single globally-atomic CAS-protected state shared between:
+||| - Writers (enqueueOperation)
+||| - Rebuilder (publish + flush)
+||| - Readers (snapshot visibility tracking)
+|||
+||| In addition to snapshot management, it also contains adaptive batching control state.
 |||
 ||| Fields:
 ||| - currentsnapshot: Current published immutable snapshot.
 ||| - retiredsnapshots: Older snapshots awaiting reclamation.
 ||| - readerstate: Active reader generation announcements.
+||| - writePressure: Global counter of buffered write operations.
+||| - rebuildpending: Indicates whether a rebuild has been requested.
 |||
-||| Properties:
-||| - Publication and retirement are atomic.
-||| - Reader visibility is linearizable.
-||| - Reclamation decisions use consistent state.
-|||
-||| Lifecycle:
-|||
-||| publish
-|||     ↓
-||| current → retired
-|||     ↓
-||| publish new snapshot
-|||     ↓
-||| reclaim old generations
+||| Invariant:
+||| - All fields are updated atomically via CAS.
 |||
 public export
 record CombinedSnapshotState a where
@@ -457,6 +451,8 @@ record CombinedSnapshotState a where
   currentsnapshot  : SnapshotState a
   retiredsnapshots : List (RetiredSnapshot a)
   readerstate      : SortedMap ThreadId ReaderState
+  writepressure    : Nat
+  rebuildpending   : Bool
 
 --------------------------------------------------------------------------------
 --          ManagedService

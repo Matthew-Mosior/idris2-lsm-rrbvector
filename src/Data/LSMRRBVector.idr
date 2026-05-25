@@ -214,28 +214,33 @@ writeOperation (MkWriteBuffers active) e =
 |||
 export
 enqueueOperation :  Ref World (SortedMap ThreadId (ThreadContext a))
+                 -> Ref World (CombinedSnapshotState a)
                  -> ThreadId
                  -> Operation a
                  -> F1' World
-enqueueOperation regref tid op t =
+enqueueOperation regref snapshotref tid op t =
   let now # t := ioToF1 (runElinIO grabTime) t
     in case now of
          Left err   =>
            (assert_total $ idris_crash "Data.LSMRRBVector.enqueueOperation: \{show err}") # t
          Right now' =>
            let ctx # t := registerThread regref tid t
-             in casmod1 regref (\m =>
-                                 let entry = MkEntry
-                                               op
-                                               now'
-                                               tid
-                                               ctx.sequence
-                                     ctx'  = { sequence := S ctx.sequence
-                                             , buffers  :=
-                                                 writeOperation ctx.buffers entry
-                                             } ctx
-                                   in update (\_ => Just ctx') tid m
-                               ) t
+               ()  # t := casmod1 regref (\m =>
+                                           let entry = MkEntry
+                                                         op
+                                                         now'
+                                                         tid
+                                                         ctx.sequence
+                                               ctx'  = { sequence := S ctx.sequence
+                                                       , buffers  := writeOperation ctx.buffers entry
+                                                       } ctx
+                                             in insert tid ctx' m
+                                         ) t
+             in casmod1 snapshotref (\s =>
+                                      { writepressure  := S s.writepressure
+                                      , rebuildpending := True
+                                      } s
+                                    ) t
   where
     grabTime : Elin World [Errno] (IClock CLOCK_REALTIME)
     grabTime = getTime CLOCK_REALTIME
@@ -251,11 +256,12 @@ enqueueOperation regref tid op t =
 |||
 export
 append :  Ref World (SortedMap ThreadId (ThreadContext a))
+       -> Ref World (CombinedSnapshotState a)
        -> ThreadId
        -> a
        -> F1' World
-append regref tid x =
-  enqueueOperation regref tid (Append x)
+append regref snapshotref tid x =
+  enqueueOperation regref snapshotref tid (Append x)
 
 ||| Prepends a value onto the logical beginning of the vector.
 |||
@@ -264,11 +270,12 @@ append regref tid x =
 |||
 export
 prepend :  Ref World (SortedMap ThreadId (ThreadContext a))
+        -> Ref World (CombinedSnapshotState a)
         -> ThreadId
         -> a
         -> F1' World
-prepend regref tid x =
-  enqueueOperation regref tid (Prepend x)
+prepend regref snapshotref tid x =
+  enqueueOperation regref snapshotref tid (Prepend x)
 
 ||| Inserts a value at a specified logical index.
 |||
@@ -277,12 +284,13 @@ prepend regref tid x =
 |||
 export
 insert :  Ref World (SortedMap ThreadId (ThreadContext a))
+       -> Ref World (CombinedSnapshotState a)
        -> ThreadId
        -> Nat
        -> a
        -> F1' World
-insert regref tid i x =
-  enqueueOperation regref tid (Insert i x)
+insert regref snapshotref tid i x =
+  enqueueOperation regref snapshotref tid (Insert i x)
 
 ||| Removes a value at a specified logical index.
 |||
@@ -291,11 +299,12 @@ insert regref tid i x =
 |||
 export
 delete :  Ref World (SortedMap ThreadId (ThreadContext a))
+       -> Ref World (CombinedSnapshotState a)
        -> ThreadId
        -> Nat
        -> F1' World
-delete regref tid i =
-  enqueueOperation regref tid (Delete i)
+delete regref snapshotref tid i =
+  enqueueOperation regref snapshotref tid (Delete i)
 
 ||| Replaces a value at a specified logical index.
 |||
@@ -304,12 +313,13 @@ delete regref tid i =
 |||
 export
 update :  Ref World (SortedMap ThreadId (ThreadContext a))
+       -> Ref World (CombinedSnapshotState a)
        -> ThreadId
        -> Nat
        -> a
        -> F1' World
-update regref tid i x =
-  enqueueOperation regref tid (Update i x)
+update regref snapshotref tid i x =
+  enqueueOperation regref snapshotref tid (Update i x)
 
 --------------------------------------------------------------------------------
 --          Rebuild Trigger
@@ -658,12 +668,12 @@ publishSnapshot :  Ref s (CombinedSnapshotState a)
                 -> List (Entry a)
                 -> F1 s Generation
 publishSnapshot combinedsnapshotstateref entries t =
-  casupdate1 combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers) =>
+  casupdate1 combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending) =>
                                         let rebuilt   = replayEntries entries snapshot.tree
                                             newgen    = S snapshot.generation
                                             snapshot' = MkSnapshotState newgen rebuilt
                                             retired'  = MkRetiredSnapshot snapshot.generation snapshot.tree :: retired
-                                          in ( MkCombinedSnapshotState snapshot' retired' readers
+                                          in ( MkCombinedSnapshotState snapshot' retired' readers writepressure rebuildpending
                                              , newgen
                                              )
                                       ) t
@@ -686,7 +696,7 @@ export
 reclaimSnapshots :  Ref s (CombinedSnapshotState a)
                  -> F1' s
 reclaimSnapshots combinedsnapshotstate t =
-  casmod1 combinedsnapshotstate (\(MkCombinedSnapshotState snapshot retired readers) =>
+  casmod1 combinedsnapshotstate (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending) =>
                                   let survivors = case minimumGeneration readers of
                                                     Nothing     =>
                                                       []
@@ -694,7 +704,7 @@ reclaimSnapshots combinedsnapshotstate t =
                                                       filter (\snap =>
                                                                snap.generation >= mingen
                                                              ) retired
-                                    in MkCombinedSnapshotState snapshot survivors readers
+                                    in MkCombinedSnapshotState snapshot survivors readers writepressure rebuildpending
                                 ) t
 
 --------------------------------------------------------------------------------
@@ -735,20 +745,25 @@ rebuildOnce buffers combinedsnapshotstate st = do
       entries    = collectEntries extracted
   case isNil entries of
     True  => do
-      -- We must read the current generation so callers stay consistent.
-      cs <- liftIO (runIO (read1 combinedsnapshotstate))
-      pure (st2, cs.currentsnapshot.generation, False)
+      let st' = { rebuildphase := Sleeping
+                } st2
+      pure (st', 0, False)
     False => do
       -- SortingEntries
-      let st3    : RebuildServiceState
-          st3    = { rebuildphase := SortingEntries } st2
+      let st3 : RebuildServiceState
+          st3 = { rebuildphase := SortingEntries
+                } st2
           sorted = sortEntries entries
       -- PublishingSnapshot
       let st4    : RebuildServiceState
           st4    = { rebuildphase := PublishingSnapshot } st3
       generation <- liftIO (runIO (publishSnapshot combinedsnapshotstate sorted))
       liftIO (runIO (reclaimSnapshots combinedsnapshotstate))
-      pure (st4, generation, True)
+      -- Reset back to idle, but preserve pressure tracking
+      let st5 = { rebuildphase   := Sleeping
+                , rebuildpending := False
+                } st4
+      pure (st5, generation, True)
 
 --------------------------------------------------------------------------------
 --          Flush Until Empty
@@ -894,7 +909,7 @@ empty :  Ord (Entry a)
       => F1 World (LSMRRBVector World e a)
 empty t =
   let buffers               # t := ref1 Data.SortedMap.empty t
-      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty) t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False) t
       rebuildscheduled      # t := ref1 False t
       rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
@@ -906,7 +921,7 @@ singleton :  Ord (Entry a)
           -> F1 World (LSMRRBVector World e a)
 singleton x t =
   let buffers               # t := ref1 Data.SortedMap.empty t
-      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty) t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty 0 False) t
       rebuildscheduled      # t := ref1 False t
       rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
