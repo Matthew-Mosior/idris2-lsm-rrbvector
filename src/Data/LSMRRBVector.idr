@@ -58,18 +58,78 @@ emptyWriteBuffers =
   MkWriteBuffers emptyBuffer
 
 --------------------------------------------------------------------------------
+--          Metrics Utilities
+--------------------------------------------------------------------------------
+
+||| Empty rebuild metrics.
+|||
+||| Properties:
+||| - No rebuilds observed.
+||| - Average batch size is effectively zero.
+|||
+export
+initialRebuildMetrics : RebuildMetrics
+initialRebuildMetrics =
+  MkRebuildMetrics
+    0
+    0
+    0
+
+--------------------------------------------------------------------------------
 --          Rebuild Service Utilities
 --------------------------------------------------------------------------------
 
-||| Initial rebuild state.
+||| Initial rebuild service state.
+|||
+||| Properties:
+||| - Service begins idle.
+||| - No rebuild failures recorded.
 |||
 export
 initialRebuildServiceState : RebuildServiceState
 initialRebuildServiceState =
   MkRebuildServiceState
     Sleeping
-    False
     Nothing
+    initialRebuildMetrics
+
+--------------------------------------------------------------------------------
+--          Metrics
+--------------------------------------------------------------------------------
+
+||| Updates rebuild metrics after a successful rebuild cycle.
+|||
+||| Parameters:
+||| - batchsize: Number of entries processed in this cycle.
+|||
+||| Properties:
+||| - O(1).
+||| - Pure deterministic update.
+|||
+export
+updateMetrics :  RebuildMetrics
+              -> Nat
+              -> RebuildMetrics
+updateMetrics m batchsize =
+  { lastbatchsize  := batchsize
+  , totalbatchsize $= (`plus` batchsize)
+  , rebuildcount   $= S
+  } m
+
+||| Computes average rebuild batch size.
+|||
+||| Returns:
+||| - 0 when no rebuilds have occurred.
+|||
+export
+averageBatchSize :  RebuildMetrics
+                 -> Nat
+averageBatchSize m =
+  case m.rebuildcount of
+    Z =>
+      0
+    S _ =>
+      m.totalbatchsize `div` m.rebuildcount
 
 --------------------------------------------------------------------------------
 --          Registering Threads
@@ -220,109 +280,37 @@ enqueueOperation :  Ref World (SortedMap ThreadId (ThreadContext a))
                  -> Ref World (CombinedSnapshotState a)
                  -> ThreadId
                  -> Operation a
-                 -> F1' World
+                 -> F1 World Bool
 enqueueOperation regref snapshotref tid op t =
   let now # t := ioToF1 (runElinIO grabTime) t
     in case now of
          Left err   =>
            (assert_total $ idris_crash "Data.LSMRRBVector.enqueueOperation: \{show err}") # t
          Right now' =>
-           let ctx # t := registerThread regref tid t
-               ()  # t := casmod1 regref (\m =>
-                                           let entry = MkEntry
-                                                         op
-                                                         now'
-                                                         tid
-                                                         ctx.sequence
-                                               ctx'  = { sequence := S ctx.sequence
-                                                       , buffers  := writeOperation ctx.buffers entry
-                                                       } ctx
-                                             in insert tid ctx' m
-                                         ) t
-             in casmod1 snapshotref (\s =>
-                                      { writepressure  := S s.writepressure
-                                      , rebuildpending := True
-                                      } s
-                                    ) t
+           let ctx           # t := registerThread regref tid t
+               ()            # t := casmod1 regref (\m =>
+                                                     let entry = MkEntry
+                                                                   op
+                                                                   now'
+                                                                   tid
+                                                                   ctx.sequence
+                                                         ctx'  = { sequence := S ctx.sequence
+                                                                 , buffers  := writeOperation ctx.buffers entry
+                                                                 } ctx
+                                                       in insert tid ctx' m
+                                                   ) t
+               shouldtrigger # t := casupdate1 snapshotref (\s =>
+                                                             let pressure' = S s.writepressure
+                                                                 pending'  = pressure' >= s.batchwindow
+                                                                 s'        = { writepressure := pressure'
+                                                                             , rebuildpending := pending'
+                                                                             } s
+                                                               in (s', pending')
+                                                           ) t
+             in shouldtrigger # t
   where
     grabTime : Elin World [Errno] (IClock CLOCK_REALTIME)
     grabTime = getTime CLOCK_REALTIME
-
---------------------------------------------------------------------------------
---          Mutation Operations
---------------------------------------------------------------------------------
-
-||| Appends a value onto the logical end of the vector.
-|||
-||| Effect:
-||| - Adds an Append operation to the thread-local buffer.
-|||
-export
-append :  Ref World (SortedMap ThreadId (ThreadContext a))
-       -> Ref World (CombinedSnapshotState a)
-       -> ThreadId
-       -> a
-       -> F1' World
-append regref snapshotref tid x =
-  enqueueOperation regref snapshotref tid (Append x)
-
-||| Prepends a value onto the logical beginning of the vector.
-|||
-||| Effect:
-||| - Adds a Prepend operation to the thread-local buffer.
-|||
-export
-prepend :  Ref World (SortedMap ThreadId (ThreadContext a))
-        -> Ref World (CombinedSnapshotState a)
-        -> ThreadId
-        -> a
-        -> F1' World
-prepend regref snapshotref tid x =
-  enqueueOperation regref snapshotref tid (Prepend x)
-
-||| Inserts a value at a specified logical index.
-|||
-||| Effect:
-||| - Adds an Insert operation to the thread-local buffer.
-|||
-export
-insert :  Ref World (SortedMap ThreadId (ThreadContext a))
-       -> Ref World (CombinedSnapshotState a)
-       -> ThreadId
-       -> Nat
-       -> a
-       -> F1' World
-insert regref snapshotref tid i x =
-  enqueueOperation regref snapshotref tid (Insert i x)
-
-||| Removes a value at a specified logical index.
-|||
-||| Effect:
-||| - Adds a Delete operation to the thread-local buffer.
-|||
-export
-delete :  Ref World (SortedMap ThreadId (ThreadContext a))
-       -> Ref World (CombinedSnapshotState a)
-       -> ThreadId
-       -> Nat
-       -> F1' World
-delete regref snapshotref tid i =
-  enqueueOperation regref snapshotref tid (Delete i)
-
-||| Replaces a value at a specified logical index.
-|||
-||| Effect:
-||| - Adds an Update operation to the thread-local buffer.
-|||
-export
-update :  Ref World (SortedMap ThreadId (ThreadContext a))
-       -> Ref World (CombinedSnapshotState a)
-       -> ThreadId
-       -> Nat
-       -> a
-       -> F1' World
-update regref snapshotref tid i x =
-  enqueueOperation regref snapshotref tid (Update i x)
 
 --------------------------------------------------------------------------------
 --          Rebuild Trigger
@@ -330,10 +318,14 @@ update regref snapshotref tid i x =
 
 ||| Sends a rebuild notification to the background rebuilder.
 |||
+||| Behavior:
+||| - Requests background progression toward snapshot publication.
+||| - Multiple requests may be coalesced.
+||| - Triggering occurs only after adaptive batching thresholds indicate sufficient accumulated write pressure.
+|||
 ||| Notes:
-||| - Multiple Trigger requests may be coalesced.
-||| - Does not guarantee an immediate rebuild.
-||| - Returns after the request has been accepted by the service.
+||| - Does not guarantee immediate rebuild execution.
+||| - Does not guarantee publication.
 |||
 export
 triggerRebuild :  LSMRRBVector s e a
@@ -355,6 +347,112 @@ triggerRebuild v t =
              in action # t
          False =>
            pure () # t
+
+--------------------------------------------------------------------------------
+--          Scheduling Helper
+--------------------------------------------------------------------------------
+
+||| Schedules rebuild work if adaptive batching has reached its target.
+|||
+||| Behavior:
+||| - Checks whether the current write accumulation has crossed the adaptive batch threshold.
+||| - Coalesces multiple concurrent scheduling attempts.
+|||
+||| Properties:
+||| - O(1).
+||| - Avoids duplicate rebuild requests.
+|||
+export
+scheduleIfNeeded :  LSMRRBVector World e a
+                 -> Bool
+                 -> F1 World (Async e [] ())
+scheduleIfNeeded v shouldTrigger t =
+  case shouldTrigger of
+    True =>
+      triggerRebuild v t
+    False =>
+      pure () # t
+
+--------------------------------------------------------------------------------
+--          Mutation Operations
+--------------------------------------------------------------------------------
+
+||| Appends a value onto the logical end of the vector.
+|||
+||| Effect:
+||| - Adds an Append operation to the thread-local buffer.
+|||
+export
+append :  LSMRRBVector World e a
+       -> ThreadId
+       -> a
+       -> F1' World
+append v tid x t =
+  let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Append x) t
+      _             # t := scheduleIfNeeded v shouldtrigger t
+    in () # t
+
+||| Prepends a value onto the logical beginning of the vector.
+|||
+||| Effect:
+||| - Adds a Prepend operation to the thread-local buffer.
+|||
+export
+prepend :  LSMRRBVector World e a
+        -> ThreadId
+        -> a
+        -> F1' World
+prepend v tid x t =
+  let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Prepend x) t
+      _             # t := scheduleIfNeeded v shouldtrigger t
+    in () # t
+
+||| Inserts a value at a specified logical index.
+|||
+||| Effect:
+||| - Adds an Insert operation to the thread-local buffer.
+|||
+export
+insert :  LSMRRBVector World e a
+       -> ThreadId
+       -> Nat
+       -> a
+       -> F1' World
+insert v tid i x t =
+  let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Insert i x) t
+      _             # t := scheduleIfNeeded v shouldtrigger t
+    in () # t
+
+||| Removes a value at a specified logical index.
+|||
+||| Effect:
+||| - Adds a Delete operation to the thread-local buffer.
+|||
+export
+delete :  LSMRRBVector World e a
+       -> ThreadId
+       -> Nat
+       -> F1' World
+delete v tid i t =
+  let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Delete i) t
+      _             # t := scheduleIfNeeded v shouldtrigger t
+    in () # t
+
+||| Replaces a value at a specified logical index.
+|||
+||| Effect:
+||| - Adds an Update operation to the thread-local buffer.
+|||
+export
+update :  LSMRRBVector World e a
+       -> ThreadId
+       -> Nat
+       -> a
+       -> F1' World
+update v tid i x t =
+  let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Update i x) t
+      _             # t := scheduleIfNeeded v shouldtrigger t
+    in () # t
 
 --------------------------------------------------------------------------------
 --          Buffer Rotation
@@ -418,18 +516,60 @@ rotateAllBuffers regref t =
 --          Entry Collection
 --------------------------------------------------------------------------------
 
+||| Converts a buffer into a list of contained entries.
+|||
+||| Behavior:
+||| - Preserves insertion order.
+||| - Extracts buffered mutation events for rebuild processing.
+|||
+||| Properties:
+||| - O(n).
+||| - Does not modify buffer ownership.
+||| - Pure projection operation.
+|||
+||| Notes:
+||| - Intended for rebuild entry collection.
+|||
 export
 bufferEntries :  Buffer a
               -> List (Entry a)
 bufferEntries (MkBuffer es _) =
   cast es
 
+||| Collects entries from multiple extracted buffers.
+|||
+||| Behavior:
+||| - Traverses all buffers.
+||| - Concatenates their entries into a single list.
+|||
+||| Properties:
+||| - O(total entries).
+||| - Preserves per-buffer ordering.
+||| - Does not perform global ordering.
+|||
+||| Notes:
+||| - Intended as a preprocessing step before sorting.
+|||
 export
 collectEntries :  List (Buffer a)
                -> List (Entry a)
 collectEntries =
   concatMap bufferEntries
 
+||| Produces a deterministic global ordering of buffered entries.
+|||
+||| Ordering:
+||| - timestamp
+||| - thread id
+||| - sequence number
+|||
+||| Properties:
+||| - O(n log n).
+||| - Deterministic across rebuild cycles.
+|||
+||| Notes:
+||| - Required before replay to ensure stable behavior under concurrent writes.
+|||
 export
 sortEntries :  Ord (Entry a)
             => List (Entry a)
@@ -651,6 +791,33 @@ null rrbvector tid t =
   readSnapshot rrbvector tid Data.RRBVector.null t
 
 --------------------------------------------------------------------------------
+--          Metrics Queries
+--------------------------------------------------------------------------------
+
+||| Returns current rebuild metrics.
+|||
+||| Properties:
+||| - O(1)
+||| - Snapshot of current service state
+|||
+export
+rebuildMetrics :  RebuildServiceState
+               -> RebuildMetrics
+rebuildMetrics st =
+  st.rebuildmetrics
+
+||| Returns average rebuild batch size.
+|||
+||| Properties:
+||| - O(1)
+|||
+export
+averageRebuildBatchSize :  RebuildServiceState
+                        -> Nat
+averageRebuildBatchSize st =
+  averageBatchSize st.rebuildmetrics
+
+--------------------------------------------------------------------------------
 --          Adaptive Batching
 --------------------------------------------------------------------------------
 
@@ -688,9 +855,9 @@ adjustBatchWindow pressure window =
 ||| Atomically publishes a rebuilt snapshot and advances adaptive batching state.
 |||
 ||| Steps:
-||| - Replay buffered operations into a rebuilt immutable tree.
+||| - Publish rebuilt immutable tree.
 ||| - Increment snapshot generation.
-||| - Retire the previous snapshot.
+||| - Retire previous snapshot.
 ||| - Reset accumulated write pressure.
 ||| - Clear rebuild pending state.
 ||| - Adaptively adjust batching window.
@@ -763,7 +930,8 @@ reclaimSnapshots combinedsnapshotstate t =
 ||| - Reclaim retired snapshots.
 |||
 ||| Returns:
-||| - Generation produced by publication.
+||| - Published generation when work exists.
+||| - 0 when no publication occurred.
 ||| - Whether any entries were processed.
 |||
 ||| Notes:
@@ -785,10 +953,10 @@ rebuildOnce buffers combinedsnapshotstate st = do
   let st2        : RebuildServiceState
       st2        = { rebuildphase := CollectingEntries } st1
       entries    = collectEntries extracted
+      batchsize  = length entries
   case isNil entries of
     True  => do
-      let st' = { rebuildphase := Sleeping
-                } st2
+      let st' = { rebuildphase := Sleeping } st2
       pure (st', 0, False)
     False => do
       -- SortingEntries
@@ -801,7 +969,11 @@ rebuildOnce buffers combinedsnapshotstate st = do
           st4    = { rebuildphase := PublishingSnapshot } st3
       generation <- liftIO (runIO (publishSnapshot combinedsnapshotstate sorted))
       liftIO (runIO (reclaimSnapshots combinedsnapshotstate))
-      pure (st4, generation, True)
+      let st5    : RebuildServiceState
+          st5    = { rebuildphase := Sleeping
+                   , rebuildmetrics := updateMetrics st4.rebuildmetrics batchsize
+                   } st4
+      pure (st5, generation, True)
 
 --------------------------------------------------------------------------------
 --          Flush Until Empty
@@ -848,10 +1020,10 @@ flushUntilEmpty buffers combinedsnapshotstate st =
 ||| Two modes of operation exist:
 |||
 ||| Trigger:
+||| - Requests background progression toward publication.
+||| - May coalesce multiple requests.
 ||| - Performs at most one rebuild cycle.
-||| - May publish a new snapshot if buffered work exists.
-||| - Intended for incremental background progression.
-||| - Does NOT guarantee that all writes are incorporated.
+||| - May or may not publish a new snapshot.
 |||
 ||| Flush:
 ||| - Repeatedly performs rebuild cycles until all buffered writes observed at invocation time are incorporated.
@@ -885,18 +1057,16 @@ handleRebuildRequest :  Ord (Entry a)
 handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Trigger = do
   (_, _, _) <- rebuildOnce buffers combinedsnapshotstate st
   liftIO (runIO (casmod1 rebuildscheduled (const False)))
-  let st' = MkRebuildServiceState
-              Sleeping
-              False
-              Nothing
+  let st' = { rebuildphase := Sleeping
+            , rebuildfailure := Nothing
+            } st
   pure (st', ())
 handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Flush = do
   (_, generation) <- flushUntilEmpty buffers combinedsnapshotstate st
-  liftIO (runIO (casmod1 rebuildscheduled (const False)))
-  let st' = MkRebuildServiceState
-              Sleeping
-              False
-              Nothing
+  liftIO (runIO (casmod1 rebuildscheduled (const False)))  
+  let st' = { rebuildphase := Sleeping
+            , rebuildfailure := Nothing
+            } st
   pure (st', generation)
 
 --------------------------------------------------------------------------------
@@ -938,16 +1108,20 @@ spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled =
           )
 
 --------------------------------------------------------------------------------
---          Creating Log-Structured Merge RRB-Vectors
+--          Default Config
 --------------------------------------------------------------------------------
 
-||| Default LSM-RRB configuration.
+||| Default LSMRRBVector configuration.
 |||
 ||| Current defaults favor balanced throughput and latency.
 |||
 export
 defaultConfig : LSMRRBConfig
 defaultConfig = MkLSMRRBConfig 64
+
+--------------------------------------------------------------------------------
+--          Creating Log-Structured Merge RRB-Vectors
+--------------------------------------------------------------------------------
 
 ||| Empty log-structured merge vector using a user-provided configuration.
 |||
@@ -970,17 +1144,44 @@ emptyWith config t =
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
 
 ||| The empty log-structured merge vector. O(1)
+|||
 export covering
 empty :  Ord (Entry a)
       => F1 World (LSMRRBVector World e a)
 empty t =
   emptyWith defaultConfig t
 
+||| Empty LSMRRBVector tuned for high sustained write throughput.
+|||
+||| Configuration:
+||| - Initial adaptive batch window: 512
+|||
+||| Behavior:
+||| - Favors larger rebuild batches.
+||| - Reduces rebuild frequency under heavy write load.
+||| - May increase visibility latency for newly written values.
+|||
+||| Notes:
+||| - Intended for write-heavy workloads.
+|||
 export covering
 fastWritesEmpty : F1 World (LSMRRBVector World e Int)
 fastWritesEmpty =
   emptyWith (MkLSMRRBConfig 512)
 
+||| Empty LSMRRBVector tuned for low publication latency.
+|||
+||| Configuration:
+||| - Initial adaptive batch window: 16
+|||
+||| Behavior:
+||| - Favors frequent rebuild cycles.
+||| - Reduces time between writes and publication.
+||| - May increase rebuild overhead under heavy load.
+|||
+||| Notes:
+||| - Intended for latency-sensitive workloads.
+|||
 export covering
 lowLatencyEmpty : F1 World (LSMRRBVector World e Int)
 lowLatencyEmpty =
@@ -1008,6 +1209,7 @@ singletonWith config x t =
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
 
 ||| A log-structured merge vector with a single element. O(1)
+|||
 export covering
 singleton :  Ord (Entry a)
           => a

@@ -24,29 +24,6 @@ import System.Posix.Timer.Prim
 %language ElabReflection
 
 --------------------------------------------------------------------------------
---          Configuration
---------------------------------------------------------------------------------
-
-||| Configuration controlling adaptive rebuild behavior.
-|||
-||| Fields:
-||| - initialbatchwindow: Initial write accumulation target before adaptive adjustment begins.
-|||
-||| Properties:
-||| - Does not affect correctness.
-||| - Only influences batching and rebuild latency/throughput tradeoffs.
-|||
-||| Typical values:
-||| - 16–64: Lower latency, more frequent rebuilds.
-||| - 64–256: Balanced throughput and latency.
-||| - 256+: Higher throughput under heavy write workloads.
-|||
-public export
-record LSMRRBConfig where
-  constructor MkLSMRRBConfig
-  initialbatchwindow : Nat
-
---------------------------------------------------------------------------------
 --          Generation
 --------------------------------------------------------------------------------
 
@@ -328,24 +305,61 @@ data RebuildFailure
 %runElab derive "RebuildFailure" [Show,Eq]
 
 --------------------------------------------------------------------------------
+--          Rebuild Metrics
+--------------------------------------------------------------------------------
+
+||| Runtime rebuild statistics.
+|||
+||| Metrics are updated after successful rebuild cycles and provide lightweight visibility into rebuild behavior.
+|||
+||| Fields:
+||| - lastbatchsize  <-> Number of entries processed during most recent rebuild.
+||| - totalbatchsize <-> Total number of entries processed across all rebuilds.
+||| - rebuildcount   <-> Number of successful rebuild cycles.
+|||
+||| Derived values:
+||| - average batch size: totalbatchsize / rebuildcount
+|||
+||| Properties:
+||| - Updated only by the rebuild worker.
+||| - Does not affect correctness.
+||| - Intended for observability and adaptive tuning.
+|||
+public export
+record RebuildMetrics where
+  constructor MkRebuildMetrics
+  lastbatchsize  : Nat
+  totalbatchsize : Nat
+  rebuildcount   : Nat
+
+%runElab derive "RebuildMetrics" [Show,Eq]
+
+--------------------------------------------------------------------------------
 --          Rebuild Service State
 --------------------------------------------------------------------------------
 
-||| Controls both execution of rebuild cycles and adaptive batching behavior.
+||| Controls execution of rebuild-cycle progress.
 |||
 ||| Fields:
 ||| - rebuildphase: Current phase of the rebuild pipeline.
-||| - rebuildpending: Indicates whether a rebuild has been scheduled by writers.
 ||| - rebuildfailure: Last observed failure in rebuild pipeline, if any.
+|||
+||| Properties:
+||| - Local service execution state only.
+||| - Does not duplicate globally visible scheduling state.
+||| - Mutable only by the rebuild worker.
+|||
+||| Notes:
+||| - Pending rebuild work is tracked globally in CombinedSnapshotState.rebuildpending.
 |||
 public export
 record RebuildServiceState where
   constructor MkRebuildServiceState
   rebuildphase   : RebuildState
-  rebuildpending : Bool
   rebuildfailure : Maybe RebuildFailure
+  rebuildmetrics : RebuildMetrics
 
-%runElab derive "RebuildServiceState" [Show]
+%runElab derive "RebuildServiceState" [Show,Eq]
 
 --------------------------------------------------------------------------------
 --          Registration
@@ -457,7 +471,7 @@ record RetiredSnapshot a where
 ||| - readerstate: Active reader generation announcements.
 ||| - writepressure: Number of writes accumulated since the last rebuild cycle.
 ||| - rebuildpending: Indicates whether buffered work exists requiring rebuild.
-||| - batchwindow: Adaptive batching target controlling rebuild granularity.
+||| - batchwindow: Current adaptive rebuild target controlling how many writes are accumulated before rebuild behavior expands or contracts.
 |||
 ||| Properties:
 ||| - Updated atomically through CAS.
@@ -546,3 +560,27 @@ record LSMRRBVector s e a where
   combinedsnapshotstate : Ref s (CombinedSnapshotState a)
   rebuildscheduled      : Ref s Bool
   rebuilder             : ManagedService e RebuildRequest RebuildResponse
+
+--------------------------------------------------------------------------------
+--          Configuration
+--------------------------------------------------------------------------------
+
+||| Configuration controlling rebuild and adaptive batching behavior.
+|||
+||| Fields:
+||| - initialbatchwindow: Initial adaptive batching target used before runtime adjustments occur.
+|||
+||| Properties:
+||| - Does not affect correctness.
+||| - Influences rebuild latency/throughput tradeoffs.
+||| - Serves as the starting point for adaptive window adjustment.
+|||
+||| Typical values:
+||| - 16–64: Lower latency, more frequent rebuilds.
+||| - 64–256: Balanced throughput and latency.
+||| - 256+: Higher throughput under sustained write load.
+|||
+public export
+record LSMRRBConfig where
+  constructor MkLSMRRBConfig
+  initialbatchwindow : Nat
