@@ -24,6 +24,29 @@ import System.Posix.Timer.Prim
 %language ElabReflection
 
 --------------------------------------------------------------------------------
+--          Configuration
+--------------------------------------------------------------------------------
+
+||| Configuration controlling adaptive rebuild behavior.
+|||
+||| Fields:
+||| - initialbatchwindow: Initial write accumulation target before adaptive adjustment begins.
+|||
+||| Properties:
+||| - Does not affect correctness.
+||| - Only influences batching and rebuild latency/throughput tradeoffs.
+|||
+||| Typical values:
+||| - 16–64: Lower latency, more frequent rebuilds.
+||| - 64–256: Balanced throughput and latency.
+||| - 256+: Higher throughput under heavy write workloads.
+|||
+public export
+record LSMRRBConfig where
+  constructor MkLSMRRBConfig
+  initialbatchwindow : Nat
+
+--------------------------------------------------------------------------------
 --          Generation
 --------------------------------------------------------------------------------
 

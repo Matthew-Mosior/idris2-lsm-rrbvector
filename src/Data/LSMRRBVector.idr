@@ -941,13 +941,68 @@ spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled =
 --          Creating Log-Structured Merge RRB-Vectors
 --------------------------------------------------------------------------------
 
+||| Default LSM-RRB configuration.
+|||
+||| Current defaults favor balanced throughput and latency.
+|||
+export
+defaultConfig : LSMRRBConfig
+defaultConfig = MkLSMRRBConfig 64
+
+||| Empty log-structured merge vector using a user-provided configuration.
+|||
+||| Parameters:
+||| - initialbatchwindow: Starting adaptive batching target.
+|||
+||| Notes:
+||| - Smaller values rebuild more aggressively.
+||| - Larger values favor write throughput.
+|||
+export covering
+emptyWith :  Ord (Entry a)
+          => LSMRRBConfig
+          -> F1 World (LSMRRBVector World e a)
+emptyWith config t =
+  let buffers               # t := ref1 Data.SortedMap.empty t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False config.initialbatchwindow) t
+      rebuildscheduled      # t := ref1 False t
+      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
+    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
+
 ||| The empty log-structured merge vector. O(1)
 export covering
 empty :  Ord (Entry a)
       => F1 World (LSMRRBVector World e a)
 empty t =
+  emptyWith defaultConfig t
+
+export covering
+fastWritesEmpty : F1 World (LSMRRBVector World e Int)
+fastWritesEmpty =
+  emptyWith (MkLSMRRBConfig 512)
+
+export covering
+lowLatencyEmpty : F1 World (LSMRRBVector World e Int)
+lowLatencyEmpty =
+  emptyWith (MkLSMRRBConfig 16)
+
+||| Singleton log-structured merge vector using a user-provided configuration.
+|||
+||| Parameters:
+||| - initialbatchwindow: Starting adaptive batching target.
+|||
+||| Notes:
+||| - Smaller values rebuild more aggressively.
+||| - Larger values favor write throughput.
+|||
+export covering
+singletonWith :  Ord (Entry a)
+              => LSMRRBConfig
+              -> a
+              -> F1 World (LSMRRBVector World e a)
+singletonWith config x t =
   let buffers               # t := ref1 Data.SortedMap.empty t
-      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False 64) t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty 0 False config.initialbatchwindow) t
       rebuildscheduled      # t := ref1 False t
       rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
@@ -958,8 +1013,4 @@ singleton :  Ord (Entry a)
           => a
           -> F1 World (LSMRRBVector World e a)
 singleton x t =
-  let buffers               # t := ref1 Data.SortedMap.empty t
-      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty 0 False 64) t
-      rebuildscheduled      # t := ref1 False t
-      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
-    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
+  singletonWith defaultConfig x t
