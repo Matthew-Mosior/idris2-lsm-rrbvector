@@ -289,22 +289,6 @@ RebuildResponse Trigger = ()
 RebuildResponse Flush   = Generation
 
 --------------------------------------------------------------------------------
---          Rebuild Failure
---------------------------------------------------------------------------------
-
-||| Failure encountered during rebuild.
-|||
-||| Failures are persisted into service state so callers can observe rebuild health.
-|||
-public export
-data RebuildFailure
-  = SnapshotReadFailure String
-  | SnapshotPublishFailure String
-  | ReplayFailure String
-
-%runElab derive "RebuildFailure" [Show,Eq]
-
---------------------------------------------------------------------------------
 --          Rebuild Metrics
 --------------------------------------------------------------------------------
 
@@ -342,47 +326,25 @@ record RebuildMetrics where
 |||
 ||| Fields:
 ||| - rebuildphase: Current phase of the rebuild pipeline.
-||| - rebuildfailure: Last observed failure in rebuild pipeline, if any.
+||| - rebuildmetrics: Runtime rebuild statistics.
 |||
 ||| Properties:
 ||| - Local service execution state only.
-||| - Does not duplicate globally visible scheduling state.
 ||| - Mutable only by the rebuild worker.
+||| - Represents execution progress rather than global vector state.
 |||
 ||| Notes:
-||| - Pending rebuild work is tracked globally in CombinedSnapshotState.rebuildpending.
+||| - Pending rebuild work is tracked globally through CombinedSnapshotState.rebuildpending.
+||| - Failure state is intentionally omitted.
+||| - Current rebuild operations are total and crash on unrecoverable runtime failures rather than persisting structured errors.
 |||
 public export
 record RebuildServiceState where
   constructor MkRebuildServiceState
   rebuildphase   : RebuildState
-  rebuildfailure : Maybe RebuildFailure
   rebuildmetrics : RebuildMetrics
 
 %runElab derive "RebuildServiceState" [Show,Eq]
-
---------------------------------------------------------------------------------
---          Registration
---------------------------------------------------------------------------------
-
-||| Result of thread registration lookup.
-|||
-||| Existing:
-||| - Thread already has registered state.
-||| - Reuses existing ThreadContext.
-|||
-||| New:
-||| - Thread was not previously registered.
-||| - Requires creation and insertion of ThreadContext.
-|||
-||| Notes:
-||| - Distinguishes allocation from lookup.
-||| - Avoids duplicate registration logic.
-|||
-public export
-data Registration a
-  = Existing a
-  | New a
 
 --------------------------------------------------------------------------------
 --          Reader State

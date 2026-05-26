@@ -58,6 +58,44 @@ emptyWriteBuffers =
   MkWriteBuffers emptyBuffer
 
 --------------------------------------------------------------------------------
+--          Thread Context Utilities
+--------------------------------------------------------------------------------
+
+||| Determines whether a buffer contains pending entries.
+|||
+||| Returns:
+||| - True when no buffered operations exist.
+||| - False otherwise.
+|||
+||| Properties:
+||| - O(1).
+|||
+export
+bufferEmpty :  Buffer a
+            -> Bool
+bufferEmpty b =
+  b.length == 0
+
+||| Determines whether a thread context contains buffered work.
+|||
+||| Returns:
+||| - True when all thread-local mutation state is empty.
+||| - False otherwise.
+|||
+||| Properties:
+||| - O(1).
+|||
+||| Notes:
+||| - Sequence numbers are ignored.
+||| - Historical sequence advancement does not imply pending work.
+|||
+export
+threadContextEmpty :  ThreadContext a
+                   -> Bool
+threadContextEmpty ctx =
+  bufferEmpty ctx.buffers.active
+
+--------------------------------------------------------------------------------
 --          Metrics Utilities
 --------------------------------------------------------------------------------
 
@@ -90,7 +128,6 @@ initialRebuildServiceState : RebuildServiceState
 initialRebuildServiceState =
   MkRebuildServiceState
     Sleeping
-    Nothing
     initialRebuildMetrics
 
 --------------------------------------------------------------------------------
@@ -160,6 +197,47 @@ registerThread regref tid t =
                                       0
                                       emptyWriteBuffers
                             in (insert tid ctx m, ctx)
+                    ) t
+
+--------------------------------------------------------------------------------
+--          Unregistering Threads
+--------------------------------------------------------------------------------
+
+||| Removes a thread registration when no buffered work remains.
+|||
+||| Behavior:
+||| - Existing empty registrations are removed.
+||| - Registrations with pending buffered operations remain.
+||| - Missing registrations are ignored.
+|||
+||| Properties:
+||| - O(log n).
+||| - Never drops buffered work.
+||| - Safe under concurrent registration attempts.
+|||
+||| Returns:
+||| - True if registration was removed.
+||| - False otherwise.
+|||
+||| Notes:
+||| - Buffered work must first be rotated and consumed by rebuild.
+||| - Intended for explicit thread lifecycle cleanup.
+|||
+export
+unregisterThread :  Ref s (SortedMap ThreadId (ThreadContext a))
+                 -> ThreadId
+                 -> F1 s Bool
+unregisterThread regref tid t =
+  casupdate1 regref (\m =>
+                      case lookup tid m of
+                        Nothing =>
+                          (m, False)
+                        Just ctx =>
+                          case threadContextEmpty ctx of
+                            True =>
+                              (delete tid m, True)
+                            False =>
+                              (m, False)
                     ) t
 
 --------------------------------------------------------------------------------
@@ -482,34 +560,43 @@ rotateBuffers ctx =
 ||| Atomically extracts active buffers from all registered threads.
 |||
 ||| Behavior:
-||| - Replaces every thread's active buffer with an empty buffer.
-||| - Transfers ownership of the previous active buffers to the rebuilder.
-||| - Writers immediately continue appending into fresh active buffers.
+||| - Replaces active buffers with empty buffers.
+||| - Transfers ownership of previous active buffers.
+||| - Removes inactive thread registrations that contain no pending work.
 |||
 ||| Returns:
-||| - A list of extracted buffers now exclusively owned by the rebuilder.
+||| - Extracted buffers now owned exclusively by the rebuilder.
 |||
 ||| Properties:
-||| - Each buffered operation is extracted exactly once.
-||| - Extracted buffers cannot be observed or modified by writers.
-||| - No buffered operations are duplicated or lost.
-||| - Atomic across the entire thread registry.
-||| - O(number of registered threads)
+||| - Extracted entries appear exactly once.
+||| - Prevents unbounded registry growth.
+||| - Atomic across the whole registry.
+||| - O(number of registered threads).
 |||
 ||| Notes:
-||| - Extraction performs ownership transfer rather than copying.
-||| - Returned buffers are intended for a single rebuild cycle.
-||| - Once extracted, buffers should be consumed exactly once.
+||| - Empty thread registrations are removed opportunistically.
+||| - Sequence numbers do not prevent removal.
 |||
 export
 rotateAllBuffers :  Ref s (SortedMap ThreadId (ThreadContext a))
                  -> F1 s (List (Buffer a))
 rotateAllBuffers regref t =
   casupdate1 regref (\m =>
-                      let rotated   = map rotateBuffers m
-                          contexts  = map fst rotated
+                      let rotated : SortedMap ThreadId (ThreadContext a, Buffer a)
+                          rotated = map rotateBuffers m
+                          extracted : List (Buffer a)
                           extracted = map snd (values rotated)
-                        in (contexts, extracted)
+                          survivors : SortedMap ThreadId (ThreadContext a)
+                          survivors = foldl (\acc, (tid, (ctx, _)) =>
+                                              case threadContextEmpty ctx of
+                                                True =>
+                                                  acc
+                                                False =>
+                                                  insert tid ctx acc
+                                            )
+                                            Data.SortedMap.empty
+                                            (Data.SortedMap.toList rotated)
+                        in (survivors, extracted)
                     ) t
 
 --------------------------------------------------------------------------------
@@ -607,36 +694,32 @@ replayEntries es v =
 --          Reading
 --------------------------------------------------------------------------------
 
-||| Reads the current immutable snapshot under generation tracking.
+||| Reads the current immutable snapshot together with its generation.
 |||
-||| Steps:
-||| - Atomically acquires the currently published snapshot.
-||| - Registers the calling thread as observing that generation.
-||| - Applies the supplied function to the snapshot tree.
-||| - Removes reader participation after evaluation completes.
+||| Behavior:
+||| - Atomically captures the current SnapshotState.
+||| - Registers the thread as an active reader of that generation.
+||| - Passes (generation, snapshot tree) to the user function.
+||| - Ensures reader registration is cleaned up after evaluation.
 |||
-||| Properties:
-||| - Snapshot acquisition and generation announcement occur atomically.
-||| - Readers observe a consistent immutable snapshot.
-||| - Prevents reclamation of snapshots while actively referenced.
-||| - Reader cleanup occurs even if evaluation fails or is canceled.
-||| - Does not block writers or rebuild activity.
+||| Key property:
+||| - The generation and tree are consistent and taken from the same CAS snapshot.
 |||
-||| Notes:
-||| - The supplied function operates on a stable immutable snapshot.
-||| - Concurrent writes or publications do not affect the observed tree.
-||| - Reader registration exists only for the duration of this operation.
+||| This enables:
+||| - Precise visibility reasoning.
+||| - Safe interaction with reclamation.
+||| - Deterministic debugging of snapshot lag.
 |||
 ||| Complexity:
 ||| - O(log n) for reader registration/removal.
-||| - Snapshot access itself is O(1).
+||| - O(1) snapshot access.
 |||
-readSnapshot :  LSMRRBVector World e a
-             -> ThreadId
-             -> (RRBVector a -> b)
-             -> F1 World b
-readSnapshot rrbvector tid f t =
-  let res # t := ioToF1 (runElinIO readSnapshot') t
+readSnapshotWithGeneration :  LSMRRBVector World e a
+                           -> ThreadId
+                           -> ((Generation, RRBVector a) -> b)
+                           -> F1 World b
+readSnapshotWithGeneration rrbvector tid f t =
+  let res # t := ioToF1 (runElinIO readSnapshotWithGeneration') t
     in case res of
          Right res' =>
            res' # t
@@ -653,13 +736,15 @@ readSnapshot rrbvector tid f t =
                                                  ) t
     use :  SnapshotState a
         -> F1 World b
-    use snapshot t = f snapshot.tree # t
+    use snapshot t =
+      let gen := snapshot.generation
+        in f (gen, snapshot.tree) # t
     release :  SnapshotState a
             -> F1' World
     release _ t =
       leaveGeneration rrbvector.combinedsnapshotstate tid t
-    readSnapshot' : Elin World [Errno] b
-    readSnapshot' =
+    readSnapshotWithGeneration' : Elin World [Errno] b
+    readSnapshotWithGeneration' =
       bracket (runIO acquire) (\snapshot => runIO (use snapshot)) (\snapshot => runIO (release snapshot))
 
 --------------------------------------------------------------------------------
@@ -689,7 +774,7 @@ toList :  LSMRRBVector World e a
        -> ThreadId
        -> F1 World (List a)
 toList rrbvector tid t =
-  readSnapshot rrbvector tid Data.RRBVector.toList t
+  readSnapshotWithGeneration rrbvector tid (\(_, v) => Data.RRBVector.toList v) t
 
 ||| Returns the number of elements in the current published snapshot.
 |||
@@ -713,7 +798,7 @@ length :  LSMRRBVector World e a
        -> ThreadId
        -> F1 World Nat
 length rrbvector tid t =
-  readSnapshot rrbvector tid Data.RRBVector.length t
+  readSnapshotWithGeneration rrbvector tid (\(_, v) => Data.RRBVector.length v) t
 
 ||| Returns the element at a given index.
 |||
@@ -739,7 +824,7 @@ index :  LSMRRBVector World e a
       -> Nat
       -> F1 World a
 index rrbvector tid i t =
-  readSnapshot rrbvector tid (\v => Data.RRBVector.index i v) t
+  readSnapshotWithGeneration rrbvector tid (\(_, v) => Data.RRBVector.index i v) t
 
 ||| Looks up an element by index.
 |||
@@ -764,7 +849,7 @@ lookup :  LSMRRBVector World e a
        -> Nat
        -> F1 World (Maybe a)
 lookup rrbvector tid i t =
-  readSnapshot rrbvector tid (\v => Data.RRBVector.lookup i v) t
+  readSnapshotWithGeneration rrbvector tid (\(_, v) => Data.RRBVector.lookup i v) t
 
 ||| Tests whether the current published snapshot is empty.
 |||
@@ -788,7 +873,7 @@ null :  LSMRRBVector World e a
      -> ThreadId
      -> F1 World Bool
 null rrbvector tid t =
-  readSnapshot rrbvector tid Data.RRBVector.null t
+  readSnapshotWithGeneration rrbvector tid (\(_, v) => Data.RRBVector.null v) t
 
 --------------------------------------------------------------------------------
 --          Metrics Queries
@@ -979,16 +1064,33 @@ rebuildOnce buffers combinedsnapshotstate st = do
 --          Flush Until Empty
 --------------------------------------------------------------------------------
 
-||| Repeatedly performs rebuild cycles until no buffered work remains.
+||| Repeatedly performs rebuild cycles until a rotation extracts no work.
 |||
-||| Properties:
-||| - Ensures Flush observes all writes that arrived before completion.
-||| - Writers may continue concurrently.
-||| - Terminates once a rotation extracts no entries.
+||| Behavior:
+||| - Executes rebuild cycles in sequence.
+||| - Each cycle atomically rotates ownership of active buffers.
+||| - Extracted entries are rebuilt into a published snapshot.
+||| - Terminates once a rotation produces no extracted entries.
+|||
+||| Visibility guarantees:
+||| - Flush establishes a quiescent visibility boundary at buffer rotation.
+||| - All writes already present in rotated buffers are incorporated before completion.
+||| - Writes arriving concurrently may appear either before or after completion depending on timing.
+||| - Flush does not stop writers or establish a global synchronization barrier.
+|||
+||| Concurrency properties:
+||| - Writers continue appending during rebuild execution.
+||| - Multiple rebuild cycles may be required if writes continue arriving.
+||| - Progress remains lock-free for writers.
 |||
 ||| Returns:
 ||| - Final rebuild state.
-||| - Last published generation.
+||| - Most recently published generation.
+|||
+||| Notes:
+||| - Completion means no buffered work was visible during the final rotation.
+||| - This is weaker than "all writes before return".
+||| - Stronger linearizable flush semantics would require an explicit epoch or barrier mechanism.
 |||
 export covering
 flushUntilEmpty :  Ord (Entry a)
@@ -1027,7 +1129,8 @@ flushUntilEmpty buffers combinedsnapshotstate st =
 |||
 ||| Flush:
 ||| - Repeatedly performs rebuild cycles until all buffered writes observed at invocation time are incorporated.
-||| - Guarantees that all prior writes are reflected in the returned snapshot generation.
+||| - Guarantees that all writes visible in rotated buffers during draining are reflected in the returned generation.
+||| - Concurrent writes may be incorporated either before or after completion.
 ||| - May perform multiple rotations and publications internally.
 |||
 ||| Concurrency guarantees:
@@ -1058,14 +1161,12 @@ handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Trigger =
   (_, _, _) <- rebuildOnce buffers combinedsnapshotstate st
   liftIO (runIO (casmod1 rebuildscheduled (const False)))
   let st' = { rebuildphase := Sleeping
-            , rebuildfailure := Nothing
             } st
   pure (st', ())
 handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Flush = do
   (_, generation) <- flushUntilEmpty buffers combinedsnapshotstate st
   liftIO (runIO (casmod1 rebuildscheduled (const False)))  
   let st' = { rebuildphase := Sleeping
-            , rebuildfailure := Nothing
             } st
   pure (st', generation)
 
