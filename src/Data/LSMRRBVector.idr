@@ -969,30 +969,90 @@ publishSnapshot combinedsnapshotstateref entries t =
                                       ) t
 
 --------------------------------------------------------------------------------
+--          Reclamation Utilities
+--------------------------------------------------------------------------------
+
+||| Computes the newest retired generation that may safely be reclaimed.
+|||
+||| Behavior:
+||| - Determines the oldest snapshot generation currently referenced by active readers.
+||| - Finds the highest retired generation strictly older than that reader boundary.
+||| - Returns Nothing when no reclaimable generation exists.
+|||
+||| Returns:
+||| - Nothing: No readers exist, or no retired snapshots can be reclaimed.
+|||
+||| - Just g: Every retired snapshot with generation <= g may safely be reclaimed.
+|||
+||| Safety rules:
+||| - Readers observing generation G may still require snapshot G.
+||| - Readers may also require all newer generations.
+||| - Only snapshots strictly older than the oldest active reader generation are reclaimable.
+|||
+||| Example:
+|||
+||| Retired              <-> [1,2,3,4,5]
+||| Active readers       <-> [4,7]
+||| oldest active reader <-> 4
+||| Safe reclamation     <-> [1,2,3]
+||| Result               <-> Just 3
+|||
+||| Properties:
+||| - O(number of retired snapshots + number of readers).
+||| - Never reclaims a snapshot visible to any active reader.
+||| - Computes a maximal safe reclamation boundary.
+|||
+export
+reclamationCutoff :
+     List (RetiredSnapshot a)
+  -> SortedMap ThreadId ReaderState
+  -> Maybe Generation
+reclamationCutoff retired readers =
+  case minimumGeneration readers of
+    Nothing =>
+      Nothing
+    Just oldest =>
+      case map generation ( filter
+                             (\snap =>
+                               snap.generation < oldest)
+                            retired
+                          ) of
+
+        []      =>
+          Nothing
+        x :: xs =>
+          Just (foldl max x xs)
+
+--------------------------------------------------------------------------------
 --          Reclamation
 --------------------------------------------------------------------------------
 
-||| Reclaims retired snapshots that are no longer visible to readers.
+||| Reclaims retired snapshots no longer visible to active readers.
 |||
 ||| Rules:
-||| - If no readers exist: reclaim everything.
-||| - Otherwise: reclaim snapshots older than oldest active generation.
+||| - No readers: Reclaim everything.
+||| - Readers exist: retain snapshots at or newer than the oldest active reader boundary.
 |||
 ||| Properties:
 ||| - Safe generation-based reclamation.
-||| - O(number of retired snapshots)
+||| - Keeps only snapshots potentially observable by readers.
+||| - O(number of retired snapshots + number of readers).
 |||
 export
 reclaimSnapshots :  Ref s (CombinedSnapshotState a)
                  -> F1' s
 reclaimSnapshots combinedsnapshotstate t =
   casmod1 combinedsnapshotstate (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending batchwindow) =>
-                                  let survivors = case minimumGeneration readers of
+                                  let survivors = case reclamationCutoff retired readers of
                                                     Nothing     =>
-                                                      []
-                                                    Just mingen =>
+                                                      case minimumGeneration readers of
+                                                        Nothing =>
+                                                          []
+                                                        Just _  =>
+                                                          retired
+                                                    Just cutoff =>
                                                       filter (\snap =>
-                                                               snap.generation >= mingen
+                                                               snap.generation > cutoff
                                                              ) retired
                                     in MkCombinedSnapshotState snapshot survivors readers writepressure rebuildpending batchwindow
                                 ) t
