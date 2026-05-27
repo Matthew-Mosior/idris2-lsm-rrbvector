@@ -258,13 +258,14 @@ unregisterThread regref tid t =
 export
 enterGeneration :  Ref s (CombinedSnapshotState a)
                 -> ThreadId
-                -> Generation
-                -> F1' s
-enterGeneration combinedsnapshotstate tid gen t =
-  casmod1 combinedsnapshotstate (\s =>
-                                  { readerstate $= insert tid (MkReaderState gen)
-                                  } s
-                                ) t
+                -> F1 s (SnapshotState a)
+enterGeneration combinedsnapshotstate tid t =
+  casupdate1 combinedsnapshotstate (\s =>
+                                     ( { readerstate $= insert tid (MkReaderState s.currentsnapshot.generation)
+                                       } s
+                                     , s.currentsnapshot
+                                     )
+                                   ) t
 
 ||| Announces that a thread has completed a snapshot read section.
 |||
@@ -728,12 +729,7 @@ readSnapshotWithGeneration rrbvector tid f t =
   where
     acquire : F1 World (SnapshotState a)
     acquire t =
-      casupdate1 rrbvector.combinedsnapshotstate (\s =>
-                                                   ( { readerstate $= insert tid (MkReaderState s.currentsnapshot.generation)
-                                                     } s
-                                                   , s.currentsnapshot
-                                                   )
-                                                 ) t
+      enterGeneration rrbvector.combinedsnapshotstate tid t
     use :  SnapshotState a
         -> F1 World b
     use snapshot t =
