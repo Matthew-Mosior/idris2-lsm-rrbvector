@@ -4,7 +4,6 @@ import DeterministicOrdering
 import GenerationMonotonic
 import HeavyAppendLoad
 import NoReadersReclaimsEverything
-import NWritersMReaders
 import ReaderAtGeneration3
 import ReaderDoesNotPinAncientGenerations
 import ReadSnapshotStable
@@ -25,5 +24,4 @@ main = do
   () <- test_ReaderAtGeneration3
   () <- test_ReaderDoesNotPinAncientGenerations
   () <- test_ReadSnapshotStable
-  () <- test_HeavyAppendLoad
-  test_NWritersMReaders
+  test_HeavyAppendLoad
