@@ -200,47 +200,6 @@ registerThread regref tid t =
                     ) t
 
 --------------------------------------------------------------------------------
---          Unregistering Threads
---------------------------------------------------------------------------------
-
-||| Removes a thread registration when no buffered work remains.
-|||
-||| Behavior:
-||| - Existing empty registrations are removed.
-||| - Registrations with pending buffered operations remain.
-||| - Missing registrations are ignored.
-|||
-||| Properties:
-||| - O(log n).
-||| - Never drops buffered work.
-||| - Safe under concurrent registration attempts.
-|||
-||| Returns:
-||| - True if registration was removed.
-||| - False otherwise.
-|||
-||| Notes:
-||| - Buffered work must first be rotated and consumed by rebuild.
-||| - Intended for explicit thread lifecycle cleanup.
-|||
-export
-unregisterThread :  Ref s (SortedMap ThreadId (ThreadContext a))
-                 -> ThreadId
-                 -> F1 s Bool
-unregisterThread regref tid t =
-  casupdate1 regref (\m =>
-                      case lookup tid m of
-                        Nothing =>
-                          (m, False)
-                        Just ctx =>
-                          case threadContextEmpty ctx of
-                            True =>
-                              (delete tid m, True)
-                            False =>
-                              (m, False)
-                    ) t
-
---------------------------------------------------------------------------------
 --          Generation Utilities
 --------------------------------------------------------------------------------
 
@@ -563,20 +522,16 @@ rotateBuffers ctx =
 ||| Behavior:
 ||| - Replaces active buffers with empty buffers.
 ||| - Transfers ownership of previous active buffers.
-||| - Removes inactive thread registrations that contain no pending work.
+||| - Removes thread registrations whose post-rotation state contains no pending work.
 |||
-||| Returns:
-||| - Extracted buffers now owned exclusively by the rebuilder.
+||| Lifecycle:
+||| - Thread registrations are cleaned up automatically during rebuild.
+||| - Explicit thread unregistration is unnecessary.
 |||
 ||| Properties:
 ||| - Extracted entries appear exactly once.
 ||| - Prevents unbounded registry growth.
-||| - Atomic across the whole registry.
 ||| - O(number of registered threads).
-|||
-||| Notes:
-||| - Empty thread registrations are removed opportunistically.
-||| - Sequence numbers do not prevent removal.
 |||
 export
 rotateAllBuffers :  Ref s (SortedMap ThreadId (ThreadContext a))
@@ -715,6 +670,7 @@ replayEntries es v =
 ||| - O(log n) for reader registration/removal.
 ||| - O(1) snapshot access.
 |||
+export
 readSnapshotWithGeneration :  LSMRRBVector World e a
                            -> ThreadId
                            -> ((Generation, RRBVector a) -> b)
