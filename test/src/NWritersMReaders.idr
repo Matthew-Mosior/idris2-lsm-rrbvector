@@ -25,9 +25,9 @@ import System.Posix.Timer.Prim
 ||| - Buffer corruption under interleaving.
 ||| - Unsafe reclamation of live generations.
 |||
-export covering
-test_NWriterMReader : IO ()
-test_NWriterMReader = do
+export
+test_NWritersMReaders : IO ()
+test_NWritersMReaders = do
   -- sorted map
   map <- newref empty
   -- shared vector system
@@ -48,6 +48,7 @@ test_NWriterMReader = do
                                  )
                                )
               )
+        usleep 5000
         writer wid n
   let reader :  Int
              -> Nat
@@ -63,21 +64,21 @@ test_NWriterMReader = do
                                                           Data.RRBVector.toList tree
                                                         )
                    )
+
+        usleep 5000
         reader rid n
   -- spawn writers
   let spawnWriters : IO (List ThreadID)
-      spawnWriter =
+      spawnWriters =
         for [0,1,2,3,4] $ \n => do
           fork $ do
             writer n 50
-            usleep 10000
   -- spawn readers
   let spawnReaders : IO (List ThreadID)
       spawnReaders =
         for [0,1,2] $ \n => do
           fork $ do
             reader n 20
-            usleep 10000
   wtids <- spawnWriters
   rtids <- spawnReaders
   -- Wait for threads to finish
@@ -85,4 +86,6 @@ test_NWriterMReader = do
     threadWait tid
   for_ rtids $ \tid =>
     threadWait tid
-  pure ()
+  css <- readref vec.combinedsnapshotstate
+  when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 5 * 50) $
+    assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
