@@ -1287,8 +1287,8 @@ rebuilderService buffers combinedsnapshotstate rebuildscheduled st =
 ||| Current defaults favor balanced throughput and latency.
 |||
 export
-defaultConfig : LSMRRBConfig
-defaultConfig = MkLSMRRBConfig 64
+defaultConfig : LSMRRBVectorConfig
+defaultConfig = MkLSMRRBVectorConfig 64
 
 --------------------------------------------------------------------------------
 --          Creating Log-Structured Merge RRB-Vectors
@@ -1305,18 +1305,17 @@ defaultConfig = MkLSMRRBConfig 64
 |||
 export covering
 emptyWith :  Ord (Entry a)
-          => Num (Subset Nat IsSucc)
           => Show (SortedMap Int (ThreadContext a))
           => Show (List (Buffer a))
-          => LSMRRBConfig
+          => LSMRRBVectorConfig
           -> F1 World (LSMRRBVector World Poll [Errno] a)
 emptyWith config t =
   let buffers               # t := ref1 Data.SortedMap.empty t
       combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False config.initialbatchwindow) t
       rebuildscheduled      # t := ref1 False t
       rebuilderservice          := rebuilderService buffers combinedsnapshotstate rebuildscheduled initialRebuildServiceState
-      --rebuilderservice      # t := ioToF1 (app 1 [SIGINT] posixPoller $ handle handlers (rebuilderService buffers combinedsnapshotstate rebuildscheduled initialRebuildServiceState)) t
-      _                     # t := ioToF1 (app 1 [SIGINT] posixPoller $ handle handlers (ignore rebuilderservice)) t
+      numthreads            # t := ioToF1 asyncThreads t
+      _                     # t := ioToF1 (app numthreads [SIGINT] posixPoller $ handle handlers (ignore rebuilderservice)) t
     in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled rebuilderservice # t
   where
     handlers : All (Handler () Poll) [Errno]
@@ -1358,12 +1357,11 @@ emptyWith config t =
 |||
 export covering
 fastWritesEmpty :  Ord (Entry a)
-                => Num (Subset Nat IsSucc)
                 => Show (SortedMap Int (ThreadContext a))
                 => Show (List (Buffer a))
                 => F1 World (LSMRRBVector World Poll [Errno] a)
-fastWritesEmpty =
-  emptyWith (MkLSMRRBConfig 512)
+fastWritesEmpty t =
+  emptyWith (MkLSMRRBVectorConfig 512) t
 
 ||| Empty LSMRRBVector tuned for low publication latency.
 |||
@@ -1380,18 +1378,16 @@ fastWritesEmpty =
 |||
 export covering
 lowLatencyEmpty :  Ord (Entry a)
-                => Num (Subset Nat IsSucc)
                 => Show (SortedMap Int (ThreadContext a))
                 => Show (List (Buffer a))
                 => F1 World (LSMRRBVector World Poll [Errno] a)
-lowLatencyEmpty =
-  emptyWith (MkLSMRRBConfig 16)
+lowLatencyEmpty t =
+  emptyWith (MkLSMRRBVectorConfig 16) t
 
 ||| The empty log-structured merge vector. O(1)
 |||
 export covering
 empty :  Ord (Entry a)
-      => Num (Subset Nat IsSucc)
       => Show (SortedMap Int (ThreadContext a))
       => Show (List (Buffer a))
       => F1 World (LSMRRBVector World Poll [Errno] a)

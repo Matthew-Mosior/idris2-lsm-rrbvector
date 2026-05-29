@@ -33,7 +33,7 @@ export
 test_NWritersMReaders : IO ()
 test_NWritersMReaders = do
   -- shared vector system
-  vec <- runIO (emptyWith (MkLSMRRBConfig 8))
+  vec <- runIO (emptyWith (MkLSMRRBVectorConfig 8))
   -- writer function
   let writer :  Int
              -> Nat

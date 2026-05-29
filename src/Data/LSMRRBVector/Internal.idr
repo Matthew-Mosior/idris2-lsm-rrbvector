@@ -587,6 +587,6 @@ record LSMRRBVector s e es a where
 ||| - 256+: Higher throughput under sustained write load.
 |||
 public export
-record LSMRRBConfig where
-  constructor MkLSMRRBConfig
+record LSMRRBVectorConfig where
+  constructor MkLSMRRBVectorConfig
   initialbatchwindow : Nat
