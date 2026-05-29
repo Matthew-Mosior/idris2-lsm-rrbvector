@@ -15,6 +15,7 @@ import Data.SortedMap
 import Data.String
 import Derive.Prelude
 import IO.Async
+import IO.Async.Core
 import IO.Async.Service
 import System.Concurrency
 import System.Posix.Timer
@@ -126,6 +127,18 @@ record Entry a where
   sequence  : Nat
 
 public export
+Show a => Show (Entry a) where
+  show (MkEntry operation timestamp threadid sequence) =
+    "MkEntry "                    ++
+    (show operation)              ++
+    " "                           ++
+    (asctime $ fromUTC timestamp) ++
+    " "                           ++
+    (show threadid)               ++
+    " "                           ++
+    (show sequence)
+
+public export
 Eq a => Eq (Entry a) where
   (MkEntry op1 ts1 tid1 seq1) == (MkEntry op2 ts2 tid2 seq2) =
        op1   == op2
@@ -164,6 +177,8 @@ record Buffer a where
   entries : SnocList (Entry a)
   length  : Nat
 
+%runElab derive "Buffer" [Show,Eq]
+
 --------------------------------------------------------------------------------
 --          Double Buffered Mutation State
 --------------------------------------------------------------------------------
@@ -186,6 +201,8 @@ public export
 record WriteBuffers a where
   constructor MkWriteBuffers
   active : Buffer a
+
+%runElab derive "WriteBuffers" [Show,Eq]
 
 --------------------------------------------------------------------------------
 --          Thread Context
@@ -212,6 +229,8 @@ record ThreadContext a where
   threadid : Int
   sequence : Nat
   buffers  : WriteBuffers a
+
+%runElab derive "ThreadContext" [Show,Eq]
 
 --------------------------------------------------------------------------------
 --          Background Rebuild State
@@ -451,16 +470,39 @@ record CombinedSnapshotState a where
   batchwindow      : Nat
 
 --------------------------------------------------------------------------------
---          ManagedService
+--          RebuildService
 --------------------------------------------------------------------------------
 
 ||| A managed effectful resource that can be started inside Async,
 ||| but stored purely in data structures.
 |||
+{-
 public export
 record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
   constructor MkManagedService
   run : Async e [] (Service e [] req resp)
+-}
+public export
+record RebuildService (0 e : Type) where
+  constructor MkRebuildService
+  run : RebuildRequest -> Async e [Errno] ()
+
+||| Creates a snapshot-rebuilding service.
+|||
+||| To make this available to many fibers, this is run as a service
+||| in the background using an internal buffer that can hold up to
+||| `capacity` messages.
+|||
+export covering
+rebuilder :  (sendrebuildrequest : RebuildRequest -> Async e [Errno] ())
+          -> Async e es (RebuildService e)
+rebuilder sendrebuildrequest = do
+  srv <- stateless (const ()) sendRebuildRequest
+  pure $ MkRebuildService (send srv . (const Trigger))
+  where
+    sendRebuildRequest :  RebuildRequest
+                       -> Async e [Errno] ()
+    sendRebuildRequest req = sendrebuildrequest req
 
 --------------------------------------------------------------------------------
 --          Log Structured Merge RRB Vector
@@ -516,12 +558,14 @@ record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
 ||| - Deterministic rebuild ordering
 |||
 public export
-record LSMRRBVector s e a where
+record LSMRRBVector s e es a where
   constructor MkLSMRRBVector
   buffers               : Ref s (SortedMap ThreadId (ThreadContext a))
   combinedsnapshotstate : Ref s (CombinedSnapshotState a)
   rebuildscheduled      : Ref s Bool
-  rebuilder             : ManagedService e RebuildRequest RebuildResponse
+  --rebuilder             : ManagedService e RebuildRequest RebuildResponse
+  --rebuildservice        : IO () -- Async e es (RebuildService e)
+  rebuildservice        : Async e es (RebuildService e)
 
 --------------------------------------------------------------------------------
 --          Configuration

@@ -4,6 +4,7 @@ version    = 0.1.0
 authors    = "Matthew-Mosior"
 sourcedir  = "src"
 depends    = lsm-rrbvector
+           , async-posix
            , posix
 main       = Main
 executable = "lsm-rrbvector-test"

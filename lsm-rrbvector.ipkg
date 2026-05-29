@@ -8,6 +8,7 @@ sourcedir = "src"
 depends   = base
           , array
           , async
+          , async-posix
           , elab-util
           , posix
           , ref1

@@ -4,6 +4,10 @@ import Data.Linear.Ref1
 import Data.LSMRRBVector
 import Data.RRBVector
 import Data.SortedMap
+import IO.Async.Core
+import IO.Async.Loop
+import IO.Async.Loop.Posix
+import IO.Async.Service
 import System
 import System.Posix.Time
 import System.Posix.Timer.Prim
@@ -28,51 +32,39 @@ import System.Posix.Timer.Prim
 export
 test_NWritersMReaders : IO ()
 test_NWritersMReaders = do
-  -- sorted map
-  map <- newref empty
   -- shared vector system
-  vec <- runIO (empty {e = ()} {a=Int})
-  -- snapshot state (required for generation tracking)
-  snapstate : Ref World (CombinedSnapshotState Int) <- newref (MkCombinedSnapshotState (MkSnapshotState 0 empty) [] empty 0 False 8)
+  vec <- runIO (emptyWith (MkLSMRRBConfig 8))
+  -- writer function
   let writer :  Int
              -> Nat
              -> IO ()
       writer wid 0     =
         pure ()
       writer wid (S n) = do
-        let entry = MkEntry (Append wid) (toUTC $ TM (cast n) 0 0 1 0 0 0 0 False) wid n
-        -- simulate buffer mutation
-        runIO ( casupdate1 map (\m =>
-                                 ( insert wid (MkBuffer (Lin <>< [entry]) 1) m
-                                 , ()
-                                 )
-                               )
-              )
+        runIO (append vec wid n)
         usleep 5000
         writer wid n
+  -- reader function
   let reader :  Int
              -> Nat
              -> IO ()
       reader rid 0     =
         pure ()
       reader rid (S n) = do
-        -- simulate entering a generation
-        _ <- runIO ( enterGeneration snapstate rid
-                   )
-        -- read snapshot (must always succeed consistently)
-        _ <- runIO ( readSnapshotWithGeneration vec rid (\(_, tree) =>
+        v <- runIO ( readSnapshotWithGeneration vec rid (\(_, tree) =>
                                                           Data.RRBVector.toList tree
                                                         )
                    )
-
+        putStrLn $ show v
         usleep 5000
         reader rid n
   -- spawn writers
   let spawnWriters : IO (List ThreadID)
       spawnWriters =
         for [0,1,2,3,4] $ \n => do
-          fork $ do
-            writer n 50
+          fork $
+            liftIO $
+              writer n 50
   -- spawn readers
   let spawnReaders : IO (List ThreadID)
       spawnReaders =
@@ -81,11 +73,15 @@ test_NWritersMReaders = do
             reader n 20
   wtids <- spawnWriters
   rtids <- spawnReaders
-  -- Wait for threads to finish
+  -- Wait for writer threads to finish
   for_ wtids $ \tid =>
     threadWait tid
+  -- Wait for reader threads to finish
   for_ rtids $ \tid =>
     threadWait tid
   css <- readref vec.combinedsnapshotstate
-  when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 5 * 50) $
+  buffers' <- readref vec.buffers
+  when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 5 * 50) $ do
+    putStrLn $ show buffers'
+    putStrLn $ show $ length $ Data.RRBVector.toList css.currentsnapshot.tree
     assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"

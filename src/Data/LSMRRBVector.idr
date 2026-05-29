@@ -22,6 +22,10 @@ import Data.SnocList
 import Data.Vect
 import Data.Zippable
 import IO.Async
+import IO.Async.Core
+import IO.Async.Loop.Poller
+import IO.Async.Loop.Posix
+import IO.Async.Posix
 import IO.Async.Service
 import Syntax.T1 as T1
 import System.Concurrency
@@ -29,6 +33,7 @@ import System.Posix.Timer
 import System.Posix.Timer.Prim
 
 %hide Control.Monad.Elin.Elin.(.run)
+%hide Control.Monad.Elin.Elin.run
 %hide Prelude.null
 %hide Prelude.Ops.infixr.(<|)
 %hide Prelude.Ops.infixl.(|>)
@@ -366,8 +371,8 @@ enqueueOperation regref snapshotref tid op t =
 ||| - Does not guarantee publication.
 |||
 export
-triggerRebuild :  LSMRRBVector s e a
-               -> F1 s (Async e [] ())
+triggerRebuild :  LSMRRBVector World Poll [Errno] a
+               -> F1 World (Async Poll [Errno] ())
 triggerRebuild v t =
   let shouldsend # t := casupdate1 v.rebuildscheduled (\scheduled =>
                                                         case scheduled of
@@ -378,10 +383,10 @@ triggerRebuild v t =
                                                       ) t
     in case shouldsend of
          True  =>
-           let action : Async e [] ()
+           let action : Async Poll [Errno] ()
                action = do
-                 svc <- v.rebuilder.run
-                 send svc Trigger
+                 svc <- v.rebuildservice
+                 run svc Trigger
              in action # t
          False =>
            pure () # t
@@ -401,13 +406,14 @@ triggerRebuild v t =
 ||| - Avoids duplicate rebuild requests.
 |||
 export
-scheduleIfNeeded :  LSMRRBVector World e a
+scheduleIfNeeded :  LSMRRBVector World Poll [Errno] a
                  -> Bool
-                 -> F1 World (Async e [] ())
-scheduleIfNeeded v shouldTrigger t =
-  case shouldTrigger of
+               --  -> Async e [] ()
+                 -> F1 World (Async Poll [Errno] ())
+scheduleIfNeeded v shouldtrigger t =
+  case shouldtrigger of
     True =>
-      triggerRebuild v t
+      triggerRebuild v t 
     False =>
       pure () # t
 
@@ -421,10 +427,11 @@ scheduleIfNeeded v shouldTrigger t =
 ||| - Adds an Append operation to the thread-local buffer.
 |||
 export
-append :  LSMRRBVector World e a
+append :  LSMRRBVector World Poll [Errno] a
        -> ThreadId
        -> a
        -> F1' World
+    --   -> Async e [] ()
 append v tid x t =
   let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Append x) t
       _             # t := scheduleIfNeeded v shouldtrigger t
@@ -436,10 +443,11 @@ append v tid x t =
 ||| - Adds a Prepend operation to the thread-local buffer.
 |||
 export
-prepend :  LSMRRBVector World e a
+prepend :  LSMRRBVector World Poll [Errno] a
         -> ThreadId
         -> a
         -> F1' World
+      --  -> Async e [] ()
 prepend v tid x t =
   let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Prepend x) t
       _             # t := scheduleIfNeeded v shouldtrigger t
@@ -451,11 +459,12 @@ prepend v tid x t =
 ||| - Adds an Insert operation to the thread-local buffer.
 |||
 export
-insert :  LSMRRBVector World e a
+insert :  LSMRRBVector World Poll [Errno] a
        -> ThreadId
        -> Nat
        -> a
        -> F1' World
+    --   -> Async e [] ()
 insert v tid i x t =
   let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Insert i x) t
       _             # t := scheduleIfNeeded v shouldtrigger t
@@ -467,10 +476,11 @@ insert v tid i x t =
 ||| - Adds a Delete operation to the thread-local buffer.
 |||
 export
-delete :  LSMRRBVector World e a
+delete :  LSMRRBVector World Poll [Errno] a
        -> ThreadId
        -> Nat
        -> F1' World
+      -- -> Async e [] ()
 delete v tid i t =
   let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Delete i) t
       _             # t := scheduleIfNeeded v shouldtrigger t
@@ -482,11 +492,12 @@ delete v tid i t =
 ||| - Adds an Update operation to the thread-local buffer.
 |||
 export
-update :  LSMRRBVector World e a
+update :  LSMRRBVector World Poll [Errno] a
        -> ThreadId
        -> Nat
        -> a
        -> F1' World
+      -- -> Async e [] ()
 update v tid i x t =
   let shouldtrigger # t := enqueueOperation v.buffers v.combinedsnapshotstate tid (Update i x) t
       _             # t := scheduleIfNeeded v shouldtrigger t
@@ -671,7 +682,7 @@ replayEntries es v =
 ||| - O(1) snapshot access.
 |||
 export
-readSnapshotWithGeneration :  LSMRRBVector World e a
+readSnapshotWithGeneration :  LSMRRBVector World Poll [Errno] a
                            -> ThreadId
                            -> ((Generation, RRBVector a) -> b)
                            -> F1 World b
@@ -697,7 +708,9 @@ readSnapshotWithGeneration rrbvector tid f t =
       leaveGeneration rrbvector.combinedsnapshotstate tid t
     readSnapshotWithGeneration' : Elin World [Errno] b
     readSnapshotWithGeneration' =
-      bracket (runIO acquire) (\snapshot => runIO (use snapshot)) (\snapshot => runIO (release snapshot))
+      bracket (runIO acquire)
+              (\snapshot => runIO (use snapshot))
+              (\snapshot => runIO (release snapshot))
 
 --------------------------------------------------------------------------------
 --          Read Operations
@@ -722,7 +735,7 @@ readSnapshotWithGeneration rrbvector tid f t =
 ||| - Conversion: O(n)
 |||
 export
-toList :  LSMRRBVector World e a
+toList :  LSMRRBVector World Poll [Errno] a
        -> ThreadId
        -> F1 World (List a)
 toList rrbvector tid t =
@@ -746,7 +759,7 @@ toList rrbvector tid t =
 ||| - O(1)
 |||
 export
-length :  LSMRRBVector World e a
+length :  LSMRRBVector World Poll [Errno] a
        -> ThreadId
        -> F1 World Nat
 length rrbvector tid t =
@@ -771,7 +784,7 @@ length rrbvector tid t =
 ||| - O(log n)
 |||
 export
-index :  LSMRRBVector World e a
+index :  LSMRRBVector World Poll [Errno] a
       -> ThreadId
       -> Nat
       -> F1 World a
@@ -796,7 +809,7 @@ index rrbvector tid i t =
 ||| - O(log n)
 |||
 export
-lookup :  LSMRRBVector World e a
+lookup :  LSMRRBVector World Poll [Errno] a
        -> ThreadId
        -> Nat
        -> F1 World (Maybe a)
@@ -821,7 +834,7 @@ lookup rrbvector tid i t =
 ||| - O(1)
 |||
 export
-null :  LSMRRBVector World e a
+null :  LSMRRBVector World Poll [Errno] a
      -> ThreadId
      -> F1 World Bool
 null rrbvector tid t =
@@ -917,7 +930,7 @@ publishSnapshot combinedsnapshotstateref entries t =
                                         let rebuilt    = replayEntries entries snapshot.tree
                                             newgen     = S snapshot.generation
                                             snapshot'  = MkSnapshotState newgen rebuilt
-                                            retired'   = MkRetiredSnapshot snapshot.generation snapshot.tree :: retired                      
+                                            retired'   = MkRetiredSnapshot snapshot.generation snapshot.tree :: retired
                                             nextwindow = adjustBatchWindow writepressure batchwindow
                                           in ( MkCombinedSnapshotState snapshot' retired' readers 0 False nextwindow
                                              , newgen
@@ -1037,15 +1050,23 @@ reclaimSnapshots combinedsnapshotstate t =
 |||
 export covering
 rebuildOnce :  Ord (Entry a)
+            => Show (SortedMap Int (ThreadContext a))
+            => Show (List (Buffer a))
             => Ref World (SortedMap Int (ThreadContext a))
             -> Ref World (CombinedSnapshotState a)
             -> RebuildServiceState
-            -> Async e [] (RebuildServiceState, Generation, Bool)
+            -> Async Poll [Errno] (RebuildServiceState, Generation, Bool)
 rebuildOnce buffers combinedsnapshotstate st = do
   -- RotatingBuffers
   let st1        : RebuildServiceState
       st1        = { rebuildphase := RotatingBuffers } st
+  liftIO (putStrLn "before rotateAllBuffers.")
+  buffers' <- readref buffers
+  liftIO (putStrLn $ show buffers')
   extracted      <- liftIO (runIO (rotateAllBuffers buffers))
+  buffers'' <- readref buffers
+  liftIO (putStrLn $ show buffers'')
+  liftIO (putStrLn $ show extracted)
   -- CollectingEntries
   let st2        : RebuildServiceState
       st2        = { rebuildphase := CollectingEntries } st1
@@ -1106,14 +1127,16 @@ rebuildOnce buffers combinedsnapshotstate st = do
 |||
 export covering
 flushUntilEmpty :  Ord (Entry a)
+                => Show (SortedMap Int (ThreadContext a))
+                => Show (List (Buffer a))
                 => Ref World (SortedMap Int (ThreadContext a))
                 -> Ref World (CombinedSnapshotState a)
                 -> RebuildServiceState
-                -> Async e [] (RebuildServiceState, Generation)
+                -> Async Poll [Errno] (RebuildServiceState, Generation)
 flushUntilEmpty buffers combinedsnapshotstate st =
   let loop :  RebuildServiceState
            -> Generation
-           -> Async e [] (RebuildServiceState, Generation)
+           -> Async Poll [Errno] (RebuildServiceState, Generation)
       loop st lastgen = do
         (st', gen, hadentries) <- rebuildOnce buffers combinedsnapshotstate st
         case hadentries of
@@ -1163,29 +1186,36 @@ flushUntilEmpty buffers combinedsnapshotstate st =
 |||
 export covering
 handleRebuildRequest :  Ord (Entry a)
+                     => Show (SortedMap Int (ThreadContext a))
+                     => Show (List (Buffer a))
                      => Ref World (SortedMap Int (ThreadContext a))
                      -> Ref World (CombinedSnapshotState a)
                      -> Ref World Bool
                      -> RebuildServiceState
                      -> (req : RebuildRequest)
-                     -> Async e [] (RebuildServiceState, RebuildResponse req)
+                     -> Async Poll [Errno] ()
+              --       -> Async e [] (RebuildServiceState, RebuildResponse req)
 handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Trigger = do
   (_, _, _) <- rebuildOnce buffers combinedsnapshotstate st
   liftIO (runIO (casmod1 rebuildscheduled (const False)))
-  let st' = { rebuildphase := Sleeping
+  let st' : RebuildServiceState
+      st' = { rebuildphase := Sleeping
             } st
-  pure (st', ())
+  --pure (st', ())
+  pure ()
 handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Flush = do
   (_, generation) <- flushUntilEmpty buffers combinedsnapshotstate st
   liftIO (runIO (casmod1 rebuildscheduled (const False)))  
-  let st' = { rebuildphase := Sleeping
+  let st' : RebuildServiceState
+      st' = { rebuildphase := Sleeping
             } st
-  pure (st', generation)
+  --pure (st', generation)
+  pure ()
 
 --------------------------------------------------------------------------------
 --          Spawn Rebuilder
 --------------------------------------------------------------------------------
-
+{-
 ||| Creates and starts the background rebuild actor service.
 |||
 ||| The returned service owns:
@@ -1207,10 +1237,13 @@ handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st Flush = d
 |||
 export covering
 spawnRebuilderService :  Ord (Entry a)
+                      => Show (SortedMap Int (ThreadContext a))
+                      => Show (List (Buffer a))
                       => Ref World (SortedMap Int (ThreadContext a))
                       -> Ref World (CombinedSnapshotState a)
                       -> Ref World Bool
-                      -> Async e [] (Service e [] RebuildRequest RebuildResponse)
+                   --   -> Async Poll [] (Service Poll [] RebuildRequest RebuildResponse)
+                      -> Async Poll [] (RebuildService Poll)
 spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled =
   service RebuildResponse
           initialRebuildServiceState
@@ -1219,6 +1252,31 @@ spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled =
               combinedsnapshotstate
               rebuildscheduled
           )
+-}
+
+--------------------------------------------------------------------------------
+--          Default Service
+--------------------------------------------------------------------------------
+
+||| The default console, printing to standard out and standard err.
+|||
+||| Note: Since many fibers might be writing to the console at the same
+|||       this uses a bounded channel with a buffer of the given
+|||       capacity internally.
+export covering
+rebuilderService :  Ord (Entry a)
+                 => Show (SortedMap Int (ThreadContext a))
+                 => Show (List (Buffer a))
+                 => Ref World (SortedMap Int (ThreadContext a))
+                 -> Ref World (CombinedSnapshotState a)
+                 -> Ref World Bool
+                 -> RebuildServiceState
+--                 -> Async Poll [Errno] ()
+                 -> Async Poll [Errno] (RebuildService Poll)
+rebuilderService buffers combinedsnapshotstate rebuildscheduled st =
+--  ignore $
+    rebuilder
+      (\req => handleRebuildRequest buffers combinedsnapshotstate rebuildscheduled st req)
 
 --------------------------------------------------------------------------------
 --          Default Config
@@ -1247,22 +1305,43 @@ defaultConfig = MkLSMRRBConfig 64
 |||
 export covering
 emptyWith :  Ord (Entry a)
+          => Num (Subset Nat IsSucc)
+          => Show (SortedMap Int (ThreadContext a))
+          => Show (List (Buffer a))
           => LSMRRBConfig
-          -> F1 World (LSMRRBVector World e a)
+          -> F1 World (LSMRRBVector World Poll [Errno] a)
+emptyWith config t =
+  let buffers               # t := ref1 Data.SortedMap.empty t
+      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False config.initialbatchwindow) t
+      rebuildscheduled      # t := ref1 False t
+      rebuilderservice          := rebuilderService buffers combinedsnapshotstate rebuildscheduled initialRebuildServiceState
+      --rebuilderservice      # t := ioToF1 (app 1 [SIGINT] posixPoller $ handle handlers (rebuilderService buffers combinedsnapshotstate rebuildscheduled initialRebuildServiceState)) t
+      _                     # t := ioToF1 (app 1 [SIGINT] posixPoller $ handle handlers (ignore rebuilderservice)) t
+    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled rebuilderservice # t
+  where
+    handlers : All (Handler () Poll) [Errno]
+    handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]
+{-
+export covering
+emptyWith :  Ord (Entry a)
+          => Num (Subset Nat IsSucc)
+          => MErr (Async Poll)
+          => Show (SortedMap Int (ThreadContext a))
+          => Show (List (Buffer a))
+          => LSMRRBConfig
+          -> F1 World (LSMRRBVector World a)
 emptyWith config t =
   let buffers               # t := ref1 Data.SortedMap.empty t
       combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False config.initialbatchwindow) t
       rebuildscheduled      # t := ref1 False t
       rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
-    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
-
-||| The empty log-structured merge vector. O(1)
-|||
-export covering
-empty :  Ord (Entry a)
-      => F1 World (LSMRRBVector World e a)
-empty t =
-  emptyWith defaultConfig t
+      ()                    # t := ioToF1 (app 1 [SIGINT] posixPoller $ handle handlers rebuilder) t
+    --in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
+    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled # t
+  where
+    handlers : All (Handler () Poll) [Errno]
+    handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]
+-}
 
 ||| Empty LSMRRBVector tuned for high sustained write throughput.
 |||
@@ -1278,7 +1357,11 @@ empty t =
 ||| - Intended for write-heavy workloads.
 |||
 export covering
-fastWritesEmpty : F1 World (LSMRRBVector World e Int)
+fastWritesEmpty :  Ord (Entry a)
+                => Num (Subset Nat IsSucc)
+                => Show (SortedMap Int (ThreadContext a))
+                => Show (List (Buffer a))
+                => F1 World (LSMRRBVector World Poll [Errno] a)
 fastWritesEmpty =
   emptyWith (MkLSMRRBConfig 512)
 
@@ -1296,36 +1379,21 @@ fastWritesEmpty =
 ||| - Intended for latency-sensitive workloads.
 |||
 export covering
-lowLatencyEmpty : F1 World (LSMRRBVector World e Int)
+lowLatencyEmpty :  Ord (Entry a)
+                => Num (Subset Nat IsSucc)
+                => Show (SortedMap Int (ThreadContext a))
+                => Show (List (Buffer a))
+                => F1 World (LSMRRBVector World Poll [Errno] a)
 lowLatencyEmpty =
   emptyWith (MkLSMRRBConfig 16)
 
-||| Singleton log-structured merge vector using a user-provided configuration.
-|||
-||| Parameters:
-||| - initialbatchwindow: Starting adaptive batching target.
-|||
-||| Notes:
-||| - Smaller values rebuild more aggressively.
-||| - Larger values favor write throughput.
+||| The empty log-structured merge vector. O(1)
 |||
 export covering
-singletonWith :  Ord (Entry a)
-              => LSMRRBConfig
-              -> a
-              -> F1 World (LSMRRBVector World e a)
-singletonWith config x t =
-  let buffers               # t := ref1 Data.SortedMap.empty t
-      combinedsnapshotstate # t := ref1 (MkCombinedSnapshotState (MkSnapshotState Z (Root 1 0 (Leaf $ A 1 $ fill 1 x))) [] Data.SortedMap.empty 0 False config.initialbatchwindow) t
-      rebuildscheduled      # t := ref1 False t
-      rebuilder                 := spawnRebuilderService buffers combinedsnapshotstate rebuildscheduled
-    in MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled (MkManagedService rebuilder) # t
-
-||| A log-structured merge vector with a single element. O(1)
-|||
-export covering
-singleton :  Ord (Entry a)
-          => a
-          -> F1 World (LSMRRBVector World e a)
-singleton x t =
-  singletonWith defaultConfig x t
+empty :  Ord (Entry a)
+      => Num (Subset Nat IsSucc)
+      => Show (SortedMap Int (ThreadContext a))
+      => Show (List (Buffer a))
+      => F1 World (LSMRRBVector World Poll [Errno] a)
+empty t =
+  emptyWith defaultConfig t

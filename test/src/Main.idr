@@ -1,5 +1,7 @@
 module Main
 
+import IO.Async.Loop.Posix
+
 import DeterministicOrdering
 import GenerationMonotonic
 import HeavyAppendLoad
@@ -12,6 +14,19 @@ import RegisterThreadReuse
 import ReplayProducesExpectedVector
 import RetiredSnapshotCreated
 import RotateTransfersOwnership
+
+-- `sigs` is used to block the default handling of the listed signals.
+covering
+test_NWritersMReaders_run : IO ()
+test_NWritersMReaders_run =
+  app 1 sigs posixPoller $ handle handlers test_NWritersMReaders
+  where
+    sigs : List Signal
+    sigs = case args of
+      "race"::_ => [SIGINT]
+      _         => []
+    handlers : All (Handler () e) [Errno]
+    handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]
 
 main : IO ()
 main = do
@@ -26,4 +41,4 @@ main = do
   () <- test_ReaderDoesNotPinAncientGenerations
   () <- test_ReadSnapshotStable
   () <- test_HeavyAppendLoad
-  test_NWritersMReaders
+  test_NWritersMReaders_run
