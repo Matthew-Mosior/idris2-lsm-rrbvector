@@ -266,7 +266,7 @@ defaultconfig = MkLSMRRBVectorConfig 64
 --          Creating Log-Structured Merge RRB-Vectors
 --------------------------------------------------------------------------------
 
-||| Empty log-structured merge vector using a user-provided configuration.
+||| Run an empty log-structured merge vector using a user-provided configuration.
 |||
 ||| Parameters:
 ||| - initialbatchwindow: Starting adaptive batching target.
@@ -280,7 +280,6 @@ runEmptyWith :  Ord (Entry a)
              => Show (SortedMap Int (ThreadContext a))
              => Show (List (Buffer a))
              => LSMRRBVectorConfig
-  --           -> (LSMRRBVector World a -> RebuildService Poll -> IO ())
              -> (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
              -> (LSMRRBVector World a -> IO ())
              -> IO ()
@@ -291,7 +290,8 @@ runEmptyWith config rebuilderaction lsmrrbvectoraction = do
   let lsmrrbvector        = MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled
   let rebuilderservice    = rebuilderService lsmrrbvector initialRebuildServiceState rebuilderaction
   let lsmrrbvectorservice = lsmrrbvectorService lsmrrbvector lsmrrbvectoraction
-  app (Element (the Nat 2) %search) [SIGINT] posixPoller $ handle handlers (rebuilderAndLSMRRBVectorService rebuilderservice lsmrrbvectorservice)
+  n                       <- asyncThreads
+  app n [SIGINT] posixPoller $ handle handlers (rebuilderAndLSMRRBVectorService rebuilderservice lsmrrbvectorservice)
   where
     handlers : All (Handler () Poll) [Errno]
     handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]
@@ -313,7 +313,6 @@ export covering
 runFastWritesEmpty :  Ord (Entry a)
                    => Show (SortedMap Int (ThreadContext a))
                    => Show (List (Buffer a))
-            --       => (LSMRRBVector World a -> RebuildService Poll -> IO ())
                    => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
                    -> (LSMRRBVector World a -> IO ())
                    -> IO ()
@@ -337,7 +336,6 @@ export covering
 runLowLatencyEmpty :  Ord (Entry a)
                    => Show (SortedMap Int (ThreadContext a))
                    => Show (List (Buffer a))
-               --    => (LSMRRBVector World a -> RebuildService Poll -> IO ())
                    => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
                    -> (LSMRRBVector World a -> IO ())
                    -> IO ()
@@ -350,7 +348,6 @@ export covering
 runEmpty :  Ord (Entry a)
          => Show (SortedMap Int (ThreadContext a))
          => Show (List (Buffer a))
---         => (LSMRRBVector World a -> RebuildService Poll -> IO ())
          => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
          -> (LSMRRBVector World a -> IO ())
          -> IO ()

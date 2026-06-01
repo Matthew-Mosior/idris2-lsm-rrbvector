@@ -25,6 +25,47 @@ import System.Posix.Timer.Prim
 %language ElabReflection
 
 --------------------------------------------------------------------------------
+--          Rebuild Service Messages
+--------------------------------------------------------------------------------
+
+||| Requests sent to the rebuild service.
+|||
+||| Trigger:
+||| - Indicates new buffered work exists.
+||| - Marks rebuild work as pending.
+||| - Does not initiate rebuild.
+|||
+||| Flush:
+||| - Forces all pending writes into a published snapshot.
+|||
+public export
+data RebuildRequest
+  = Trigger
+  | Flush
+
+%runElab derive "RebuildRequest" [Show,Eq]
+
+--------------------------------------------------------------------------------
+--          Snapshot-Rebuilding Service
+--------------------------------------------------------------------------------
+
+public export
+record RebuildService (0 e : Type) where
+  constructor MkRebuildService
+  run : RebuildRequest -> Async e [Errno] ()
+
+export covering
+rebuilder :  (sendrebuildrequest : RebuildRequest -> Async e [Errno] ())
+          -> Async e es (RebuildService e)
+rebuilder sendrebuildrequest = do
+  srv <- stateless (const ()) sendRebuildRequest
+  pure $ MkRebuildService (send srv)
+  where
+    sendRebuildRequest :  RebuildRequest
+                       -> Async e [Errno] ()
+    sendRebuildRequest req = sendrebuildrequest req
+
+--------------------------------------------------------------------------------
 --          Generation
 --------------------------------------------------------------------------------
 
@@ -263,51 +304,6 @@ data RebuildState
 %runElab derive "RebuildState" [Show,Eq]
 
 --------------------------------------------------------------------------------
---          Rebuild Service Messages
---------------------------------------------------------------------------------
-
-||| Requests sent to the rebuild service.
-|||
-||| Trigger:
-||| - Indicates new buffered work exists.
-||| - Marks rebuild work as pending.
-||| - Does not initiate rebuild.
-|||
-||| Flush:
-||| - Forces all pending writes into a published snapshot.
-|||
-public export
-data RebuildRequest
-  = Trigger
-  | Flush
-
-%runElab derive "RebuildRequest" [Show,Eq]
-
---------------------------------------------------------------------------------
---          Rebuild Service Responses
---------------------------------------------------------------------------------
-
-||| Response produced by the rebuild service.
-|||
-||| Trigger:
-||| - Acknowledges notification that buffered work exists.
-||| - Does not imply that a rebuild occurred.
-||| - Multiple Trigger requests may be coalesced.
-|||
-||| Flush:
-||| - Indicates that all currently buffered writes have been incorporated into a published snapshot.
-|||
-||| Notes:
-||| - Responses currently contain no payload.
-||| - Dependent typing preserves request/response correspondence.
-||| - Future extensions may return rebuild metrics or generation numbers.
-|||
-public export
-RebuildResponse : RebuildRequest -> Type
-RebuildResponse Trigger = ()
-RebuildResponse Flush   = Generation
-
---------------------------------------------------------------------------------
 --          Rebuild Metrics
 --------------------------------------------------------------------------------
 
@@ -468,26 +464,6 @@ record CombinedSnapshotState a where
   writepressure    : Nat
   rebuildpending   : Bool
   batchwindow      : Nat
-
---------------------------------------------------------------------------------
---          Snapshot-Rebuilding Service
---------------------------------------------------------------------------------
-
-public export
-record RebuildService (0 e : Type) where
-  constructor MkRebuildService
-  run : RebuildRequest -> Async e [Errno] ()
-
-export covering
-rebuilder :  (sendrebuildrequest : RebuildRequest -> Async e [Errno] ())
-          -> Async e es (RebuildService e)
-rebuilder sendrebuildrequest = do
-  srv <- stateless (const ()) sendRebuildRequest
-  pure $ MkRebuildService (send srv)
-  where
-    sendRebuildRequest :  RebuildRequest
-                       -> Async e [Errno] ()
-    sendRebuildRequest req = sendrebuildrequest req
 
 --------------------------------------------------------------------------------
 --          Log Structured Merge RRB Vector

@@ -383,18 +383,9 @@ triggerRebuild lsmrrbvector svc = do
                                                      )
   case shouldsend of
     True  => do
-      print "before action!"
-      --action
       run svc Trigger
     False =>
       pure ()
-  {-
-  where
-    action : Async Poll [Errno] ()
-    action = do
-      svc <- v.rebuildservice
-      run svc Trigger
-  -}
 
 --------------------------------------------------------------------------------
 --          Scheduling Helper
@@ -981,7 +972,6 @@ handleRebuildRequest :  Ord (Entry a)
                      -> RebuildServiceState
                      -> (req : RebuildRequest)
                      -> Async Poll [Errno] ()
-              --       -> Async e [] (RebuildServiceState, RebuildResponse req)
 handleRebuildRequest lsmrrbvector st Trigger = do
   liftIO (print "before rebuildOnce")
   (_, _, _) <- rebuildOnce lsmrrbvector.buffers lsmrrbvector.combinedsnapshotstate st
@@ -1009,15 +999,13 @@ rebuilderService :  Ord (Entry a)
                  => Show (List (Buffer a))
                  => LSMRRBVector World a
                  -> RebuildServiceState
-                 -> (LSMRRBVector World a -> RebuildService Poll -> IO ())
-            --     -> (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+                 -> (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
                  -> Async Poll [Errno] ()
 rebuilderService lsmrrbvector st action = do
   rebuilderservice <-
     rebuilder
       (\req => handleRebuildRequest lsmrrbvector st req)
-  liftIO $
-    action lsmrrbvector rebuilderservice
+  action lsmrrbvector rebuilderservice
 
 --------------------------------------------------------------------------------
 --          LSMRRBVector Service
@@ -1042,11 +1030,7 @@ rebuilderAndLSMRRBVectorService :  Async Poll [Errno] ()
 rebuilderAndLSMRRBVectorService rebuilderservice lsmrrbvectorservice =
   race_
     [ -- rebuilder (writer) service
-      --rebuilderservice
-      liftIO (app (Element (the Nat 1) %search) [SIGINT] posixPoller $ handle handlers rebuilderservice)
+      rebuilderservice
     , -- lsmrrbvector (reader) service
       lsmrrbvectorservice
     ]
-   where
-    handlers : All (Handler () Poll) [Errno]
-    handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]

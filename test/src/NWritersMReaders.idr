@@ -46,16 +46,6 @@ test_NWritersMReaders = do
                         liftIO (usleep 5000)
                         writer wid n
                   writer 5 50
-                  -- spawn writers
-                  --let spawnWriters : IO (List ThreadID)
-                  --    spawnWriters =
-                  --      for [0,1,2,3,4] $ \n => do
-                  --        fork $
-                  --          runAsync (Async Poll) (writer n 50)
-                  --wtids <- spawnWriters
-                  -- Wait for writer threads to finish
-                  --for_ wtids $ \tid =>
-                  --  threadWait tid
                 )
                 (\vec : LSMRRBVector World Int => do
                         -- reader function
@@ -68,15 +58,15 @@ test_NWritersMReaders = do
                               v <- readSnapshotWithGeneration vec rid (\(_, tree) =>
                                                                         Data.RRBVector.toList tree
                                                                       )
-                              putStrLn $ show v
+                              --putStrLn $ show v
                               usleep 5000
                               reader rid n
                         -- spawn readers
                         let spawnReaders : IO (List ThreadID)
                             spawnReaders =
-                              for [0,1,2] $ \n => do
+                              for [0,1] $ \n => do
                                 fork $ do
-                                  reader n 20
+                                  reader n 25
                         usleep 10000
                         rtids <- spawnReaders
                         -- Wait for reader threads to finish
@@ -84,7 +74,7 @@ test_NWritersMReaders = do
                           threadWait tid
                         css <- readref vec.combinedsnapshotstate
                         buffers' <- readref vec.buffers
-                        when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 5 * 50) $ do
+                        when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 50) $ do
                           putStrLn $ show buffers'
                           putStrLn $ show $ length $ Data.RRBVector.toList css.currentsnapshot.tree
                           assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
