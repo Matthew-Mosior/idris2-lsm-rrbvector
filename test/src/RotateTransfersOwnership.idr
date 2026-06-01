@@ -17,21 +17,21 @@ import System.Posix.Timer.Prim
 export
 test_RotateTransfersOwnership : IO ()
 test_RotateTransfersOwnership = do
-  reg : Ref World (SortedMap ThreadId (ThreadContext Int)) <- newref empty
+  reg : Ref World (SortedMap ThreadId (ThreadContext Int)) <-
+    newref empty
   -- register this thread (this ensures proper initial context exists)
-  ctx <- runIO (registerThread reg 1)
+  ctx <- registerThread reg 1
   -- inject an entry into the actual context
   let entry = MkEntry (Append 42) (toUTC $ TM 0 0 0 1 0 0 0 0 False) 1 ctx.sequence
-  _ <- runIO (casupdate1 reg (\m =>
-                               case lookup 1 m of
-                                 Just c  =>
-                                   let c' = { buffers := writeOperation c.buffers entry } c
-                                     in (insert 1 c' m, ())
-                                 Nothing =>
-                                   (m, ())
-                             )
-             )
-  extracted <- runIO (rotateAllBuffers reg)
+  _ <- update reg (\m =>
+                    case lookup 1 m of
+                      Just c  =>
+                        let c' = { buffers := writeOperation c.buffers entry } c
+                          in (insert 1 c' m, ())
+                      Nothing =>
+                        (m, ())
+                  )
+  extracted <- rotateAllBuffers reg
   -- after rotation, registry should still exist but buffer should be cleared
   regstate <- readref reg
   case lookup 1 regstate of

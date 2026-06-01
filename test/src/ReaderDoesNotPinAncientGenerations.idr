@@ -12,4 +12,4 @@ test_ReaderDoesNotPinAncientGenerations : IO ()
 test_ReaderDoesNotPinAncientGenerations = do
   state : Ref World (CombinedSnapshotState Int) <-
     newref (MkCombinedSnapshotState (MkSnapshotState 10 Empty) [MkRetiredSnapshot 1 Empty, MkRetiredSnapshot 2 Empty] empty 0 False 64)
-  runIO (leaveGeneration state 1)
+  leaveGeneration state 1

@@ -21,9 +21,10 @@ import Data.SortedMap
 export
 test_RegisterThreadReuse : IO ()
 test_RegisterThreadReuse = do
-  reg : Ref World (SortedMap ThreadId (ThreadContext Int)) <- newref empty
-  ctx1 <- runIO (registerThread reg 1)
-  ctx2 <- runIO (registerThread reg 1)
+  reg : Ref World (SortedMap ThreadId (ThreadContext Int))
+    <- newref empty
+  ctx1 <- registerThread reg 1
+  ctx2 <- registerThread reg 1
   when (ctx1.threadid /= ctx2.threadid || ctx1.sequence /= ctx2.sequence) $
     assert_total $ idris_crash "testRegisterThreadReuse: duplicate ThreadContext created"
   registry <- readref reg

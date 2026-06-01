@@ -10,7 +10,6 @@ import Data.SortedMap
 export
 test_NoReadersReclaimsEverything : IO ()
 test_NoReadersReclaimsEverything = do
-  let s0 : SnapshotState Int
-      s0 = MkSnapshotState 0 empty
-  state  <- newref (MkCombinedSnapshotState s0 [MkRetiredSnapshot 0 empty] empty 0 False 64)
-  runIO (reclaimSnapshots state)
+  state : Ref World (CombinedSnapshotState Int) <-
+    newref (MkCombinedSnapshotState (MkSnapshotState 0 empty) [MkRetiredSnapshot 0 empty] empty 0 False 64)
+  reclaimSnapshots state

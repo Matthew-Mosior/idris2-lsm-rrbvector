@@ -14,5 +14,6 @@ depends   = base
           , ref1
 modules   = Data.LSMRRBVector
           , Data.LSMRRBVector.Internal
+          , Data.LSMRRBVector.Types
           , Data.RRBVector
           , Data.RRBVector.Internal

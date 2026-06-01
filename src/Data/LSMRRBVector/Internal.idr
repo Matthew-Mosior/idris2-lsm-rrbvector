@@ -1,592 +1,1052 @@
-||| LSM RRB Vector Internals
+||| Log-Structured Merge RRB Vectors Internals
 module Data.LSMRRBVector.Internal
 
+import public Data.LSMRRBVector.Types
+import Data.RRBVector
+
+import Control.Monad.Elin
+import Control.Monad.MCancel
+import Control.Monad.ST
 import Data.Array
 import Data.Array.Core
 import Data.Array.Index
 import Data.Array.Indexed
 import Data.Bits
-import Data.List
-import Data.Nat
 import Data.Linear.Ref1
+import Data.List
+import Data.List1
+import Data.Maybe
 import Data.RRBVector
-import Data.RRBVector.Internal
 import Data.SortedMap
-import Data.String
-import Derive.Prelude
+import Data.SnocList
+import Data.Vect
+import Data.Zippable
 import IO.Async
 import IO.Async.Core
+import IO.Async.Loop.Poller
+import IO.Async.Loop.Posix
+import IO.Async.Posix
 import IO.Async.Service
+import Syntax.T1 as T1
 import System.Concurrency
 import System.Posix.Timer
 import System.Posix.Timer.Prim
 
+%hide Control.Monad.Elin.Elin.(.run)
+%hide Control.Monad.Elin.Elin.run
+%hide Prelude.null
+%hide Prelude.Ops.infixr.(<|)
+%hide Prelude.Ops.infixl.(|>)
+
 %default total
-%language ElabReflection
 
 --------------------------------------------------------------------------------
---          Generation
+--          Buffer Utilities
 --------------------------------------------------------------------------------
 
-||| Snapshot generation identifier.
+||| Empty mutation buffer.
 |||
-||| Represents the logical version of the currently published
-||| immutable snapshot.
+export
+emptyBuffer : Buffer a
+emptyBuffer =
+  MkBuffer [<] 0
+
+--------------------------------------------------------------------------------
+--          Write Buffer Utilities
+--------------------------------------------------------------------------------
+
+||| Empty buffer state.
+|||
+export
+emptyWriteBuffers : WriteBuffers a
+emptyWriteBuffers =
+  MkWriteBuffers emptyBuffer
+
+--------------------------------------------------------------------------------
+--          Thread Context Utilities
+--------------------------------------------------------------------------------
+
+||| Determines whether a buffer contains pending entries.
+|||
+||| Returns:
+||| - True when no buffered operations exist.
+||| - False otherwise.
 |||
 ||| Properties:
-||| - Monotonically increasing.
-||| - Incremented only after successful publication.
-||| - Readers may compare generations to detect snapshot changes.
+||| - O(1).
+|||
+export
+bufferEmpty :  Buffer a
+            -> Bool
+bufferEmpty b =
+  b.length == 0
+
+||| Determines whether a thread context contains buffered work.
+|||
+||| Returns:
+||| - True when all thread-local mutation state is empty.
+||| - False otherwise.
+|||
+||| Properties:
+||| - O(1).
 |||
 ||| Notes:
-||| - Does not encode time.
-||| - Exists purely for ordering and visibility.
+||| - Sequence numbers are ignored.
+||| - Historical sequence advancement does not imply pending work.
 |||
-public export
-Generation : Type
-Generation = Nat
+export
+threadContextEmpty :  ThreadContext a
+                   -> Bool
+threadContextEmpty ctx =
+  bufferEmpty ctx.buffers.active
 
 --------------------------------------------------------------------------------
---          ThreadId
+--          Metrics Utilities
 --------------------------------------------------------------------------------
 
-||| A wrapper over Int for thread ids.
+||| Empty rebuild metrics.
 |||
-public export
-ThreadId : Type
-ThreadId = Int
+||| Properties:
+||| - No rebuilds observed.
+||| - Average batch size is effectively zero.
+|||
+export
+initialRebuildMetrics : RebuildMetrics
+initialRebuildMetrics =
+  MkRebuildMetrics
+    0
+    0
+    0
 
 --------------------------------------------------------------------------------
---          Buffered Operations
+--          Rebuild Service Utilities
 --------------------------------------------------------------------------------
 
-||| Operation represents a deferred vector mutation.
+||| Initial rebuild service state.
 |||
-||| Rather than mutating the underlying RRBVector immediately, all user
-||| modifications are first converted into Operations and appended into
-||| thread-indexed shared state.
+||| Properties:
+||| - Service begins idle.
+||| - No rebuild failures recorded.
 |||
-||| Variants:
-||| - Prepend a
-|||   Insert a value at the logical beginning.
-||| - Append a
-|||   Insert a value at the logical end.
-||| - Insert Nat a
-|||   Insert a value at a specified index.
-||| - Delete Nat
-|||   Remove a value at a specified index.
-||| - Update Nat a
-|||   Replace a value at a specified index.
+export
+initialRebuildServiceState : RebuildServiceState
+initialRebuildServiceState =
+  MkRebuildServiceState
+    Sleeping
+    initialRebuildMetrics
+
+--------------------------------------------------------------------------------
+--          Metrics
+--------------------------------------------------------------------------------
+
+||| Updates rebuild metrics after a successful rebuild cycle.
 |||
-||| Role in LSM design:
-||| - Forms the deferred mutation layer.
-||| - Enables batching.
-||| - Prevents writers from mutating snapshots.
+||| Parameters:
+||| - batchsize: Number of entries processed in this cycle.
+|||
+||| Properties:
+||| - O(1).
+||| - Pure deterministic update.
+|||
+export
+updateMetrics :  RebuildMetrics
+              -> Nat
+              -> RebuildMetrics
+updateMetrics m batchsize =
+  { lastbatchsize  := batchsize
+  , totalbatchsize $= (`plus` batchsize)
+  , rebuildcount   $= S
+  } m
+
+||| Computes average rebuild batch size.
+|||
+||| Returns:
+||| - 0 when no rebuilds have occurred.
+|||
+export
+averageBatchSize :  RebuildMetrics
+                 -> Nat
+averageBatchSize m =
+  case m.rebuildcount of
+    Z =>
+      0
+    S _ =>
+      m.totalbatchsize `div` m.rebuildcount
+
+--------------------------------------------------------------------------------
+--          Registering Threads
+--------------------------------------------------------------------------------
+
+||| Registers a thread if necessary and returns its thread context.
+|||
+||| Behavior:
+||| - Existing registrations are reused.
+||| - Missing registrations allocate fresh thread state.
+|||
+||| Properties:
+||| - One ThreadContext per ThreadId.
+||| - Preserves existing mutation state.
+|||
+export
+registerThread :  Ref World (SortedMap ThreadId (ThreadContext a))
+               -> ThreadId
+               -> IO (ThreadContext a)
+registerThread regref tid =
+  update regref (\m =>
+                  case lookup tid m of
+                    Just ctx =>
+                      (m, ctx)
+                    Nothing  =>
+                      let ctx = MkThreadContext
+                                  tid
+                                  0
+                                  emptyWriteBuffers
+                        in (insert tid ctx m, ctx)
+                )
+
+--------------------------------------------------------------------------------
+--          Generation Utilities
+--------------------------------------------------------------------------------
+
+||| Announces that a thread has entered a snapshot read section.
+|||
+||| Behavior:
+||| - Registers the generation currently being read.
+||| - Replaces any previous generation announcement.
+|||
+||| Properties:
+||| - O(log n).
+||| - One active generation per thread.
+||| - Used by reclamation safety checks.
+|||
+export
+enterGeneration :  Ref World (CombinedSnapshotState a)
+                -> ThreadId
+                -> IO (SnapshotState a)
+enterGeneration combinedsnapshotstate tid =
+  update combinedsnapshotstate (\s =>
+                                 ( { readerstate $= insert tid (MkReaderState s.currentsnapshot.generation)
+                                   } s
+                                 , s.currentsnapshot
+                                 )
+                               )
+
+||| Announces that a thread has completed a snapshot read section.
+|||
+||| Behavior:
+||| - Removes thread participation state.
+||| - Indicates thread no longer references a snapshot.
+|||
+||| Properties:
+||| - O(log n).
+||| - Enables reclamation progress.
+|||
+export
+leaveGeneration :  Ref World (CombinedSnapshotState a)
+                -> ThreadId
+                -> IO ()
+leaveGeneration combinedsnapshotstate tid =
+  mod combinedsnapshotstate (\s =>
+                              { readerstate $= delete tid
+                              } s
+                            )
+
+||| Finds oldest active generation.
+|||
+||| Returns:
+||| - Nothing when no readers exist.
+||| - Just generation otherwise.
+|||
+||| Properties:
+||| - O(n).
+|||
+export
+minimumGeneration :  SortedMap ThreadId ReaderState
+                  -> Maybe Generation
+minimumGeneration rs =
+    case map generation (values rs) of
+      []    =>
+        Nothing
+      x::xs =>
+        Just (foldl min x xs)
+
+--------------------------------------------------------------------------------
+--          Mutation Utilities
+--------------------------------------------------------------------------------
+
+||| Appends an Entry onto the end of a mutation buffer.
+|||
+||| Properties:
+||| - O(1).
+||| - Preserves insertion ordering.
+|||
+export
+appendEntry :  Buffer a
+            -> Entry a
+            -> Buffer a
+appendEntry (MkBuffer es n) e =
+  MkBuffer (es :< e) (S n)
+
+||| Appends a deferred mutation into the active write buffer.
+|||
+||| Properties:
+||| - Frozen buffer remains unchanged.
+||| - O(1) amortized.
+|||
+export
+writeOperation :  WriteBuffers a
+               -> Entry a
+               -> WriteBuffers a
+writeOperation (MkWriteBuffers active) e =
+  MkWriteBuffers
+    (appendEntry active e)
+
+||| Converts an operation into an Entry and appends it into the owning thread's active mutation buffer.
+|||
+||| Steps:
+||| - Acquire current timestamp.
+||| - Register thread if necessary.
+||| - Allocate Entry.
+||| - Increment sequence counter.
+||| - Append into active write buffer.
+||| - Increment global write pressure.
+||| - Mark rebuild work as pending.
+|||
+||| Properties:
+||| - O(log n) registry update.
+||| - O(1) buffer append.
+||| - Deterministic replay ordering.
+||| - Adaptive batching pressure is globally visible atomically.
+|||
+export
+enqueueOperation :  Ref World (SortedMap ThreadId (ThreadContext a))
+                 -> Ref World (CombinedSnapshotState a)
+                 -> ThreadId
+                 -> Operation a
+                 -> IO Bool
+enqueueOperation regref snapshotref tid op = do
+  now <- runElinIO grabTime
+  case now of
+    Left err   =>
+      assert_total $ idris_crash "Data.LSMRRBVector.enqueueOperation: \{show err}"
+    Right now' => do
+      ctx <- registerThread regref tid
+      mod regref (\m =>
+                   let entry = MkEntry
+                                 op
+                                 now'
+                                 tid
+                                 ctx.sequence
+                       ctx'  = { sequence := S ctx.sequence
+                               , buffers  := writeOperation ctx.buffers entry
+                               } ctx
+                     in insert tid ctx' m
+                 )
+      update snapshotref (\s =>
+                           let pressure' = S s.writepressure
+                               pending'  = pressure' >= s.batchwindow
+                               s'        = { writepressure := pressure'
+                                           , rebuildpending := pending'
+                                           } s
+                             in (s', pending')
+                         )
+  where
+    grabTime : Elin World [Errno] (IClock CLOCK_REALTIME)
+    grabTime = getTime CLOCK_REALTIME
+
+--------------------------------------------------------------------------------
+--          Rebuild Trigger
+--------------------------------------------------------------------------------
+
+||| Sends a rebuild notification to the background rebuilder.
+|||
+||| Behavior:
+||| - Requests background progression toward snapshot publication.
+||| - Multiple requests may be coalesced.
+||| - Triggering occurs only after adaptive batching thresholds indicate sufficient accumulated write pressure.
 |||
 ||| Notes:
-||| Indices are interpreted relative to the visible snapshot together with preceding replayed operations.
+||| - Does not guarantee immediate rebuild execution.
+||| - Does not guarantee publication.
 |||
-public export
-data Operation a
-  = Prepend a
-  | Append a
-  | Insert Nat a
-  | Delete Nat
-  | Update Nat a
-
-%runElab derive "Operation" [Show,Eq]
+export
+triggerRebuild :  LSMRRBVector World a
+               -> RebuildService Poll
+               -> Async Poll [Errno] ()
+triggerRebuild lsmrrbvector svc = do
+  shouldsend <- update lsmrrbvector.rebuildscheduled (\scheduled =>
+                                                       case scheduled of
+                                                         True  =>
+                                                           (True, False)
+                                                         False =>
+                                                           (True, True)
+                                                     )
+  case shouldsend of
+    True  => do
+      print "before action!"
+      --action
+      run svc Trigger
+    False =>
+      pure ()
+  {-
+  where
+    action : Async Poll [Errno] ()
+    action = do
+      svc <- v.rebuildservice
+      run svc Trigger
+  -}
 
 --------------------------------------------------------------------------------
---          Write Buffer Entries
+--          Scheduling Helper
 --------------------------------------------------------------------------------
 
-||| Entry represents a deferred mutation event.
+||| Schedules rebuild work if adaptive batching has reached its target.
 |||
-||| Every user write becomes an Entry before entering a thread buffer.
+||| Behavior:
+||| - Checks whether the current write accumulation has crossed the adaptive batch threshold.
+||| - Coalesces multiple concurrent scheduling attempts.
 |||
-||| Fields:
-||| - operation <-> Deferred mutation
-||| - timestamp <-> Wall-clock ordering hint
-||| - threadid  <-> Originating thread
-||| - sequence  <-> Monotonic per-thread counter
+||| Properties:
+||| - O(1).
+||| - Avoids duplicate rebuild requests.
+|||
+export
+scheduleIfNeeded :  LSMRRBVector World a
+                 -> RebuildService Poll
+                 -> Bool
+                 -> Async Poll [Errno] ()
+scheduleIfNeeded lsmrrbvector svc shouldtrigger =
+  case shouldtrigger of
+    True =>
+      triggerRebuild lsmrrbvector svc
+    False =>
+      pure ()
+
+--------------------------------------------------------------------------------
+--          Buffer Rotation
+--------------------------------------------------------------------------------
+
+||| Extract active buffer ownership for rebuilding.
+|||
+||| Returns:
+||| - Updated thread context with empty active buffer
+||| - Extracted buffer now owned by rebuilder
+|||
+export
+rotateBuffers :  ThreadContext a
+              -> (ThreadContext a, Buffer a)
+rotateBuffers ctx =
+  let active = ctx.buffers.active
+      ctx'   = { buffers :=
+                   MkWriteBuffers
+                     emptyBuffer
+               } ctx
+    in (ctx', active)
+
+--------------------------------------------------------------------------------
+--          Registry Rotation
+--------------------------------------------------------------------------------
+
+||| Atomically extracts active buffers from all registered threads.
+|||
+||| Behavior:
+||| - Replaces active buffers with empty buffers.
+||| - Transfers ownership of previous active buffers.
+||| - Removes thread registrations whose post-rotation state contains no pending work.
+|||
+||| Lifecycle:
+||| - Thread registrations are cleaned up automatically during rebuild.
+||| - Explicit thread unregistration is unnecessary.
+|||
+||| Properties:
+||| - Extracted entries appear exactly once.
+||| - Prevents unbounded registry growth.
+||| - O(number of registered threads).
+|||
+export
+rotateAllBuffers :  Ref World (SortedMap ThreadId (ThreadContext a))
+                 -> IO (List (Buffer a))
+rotateAllBuffers regref = do
+  update regref (\m =>
+                  let rotated : SortedMap ThreadId (ThreadContext a, Buffer a)
+                      rotated = map rotateBuffers m
+                      extracted : List (Buffer a)
+                      extracted = map snd (values rotated)
+                      survivors : SortedMap ThreadId (ThreadContext a)
+                      survivors = foldl (\acc, (tid, (ctx, _)) =>
+                                          case threadContextEmpty ctx of
+                                            True =>
+                                              acc
+                                            False =>
+                                              insert tid ctx acc
+                                        )
+                                        Data.SortedMap.empty
+                                        (Data.SortedMap.toList rotated)
+                    in (survivors, extracted)
+                )
+
+--------------------------------------------------------------------------------
+--          Entry Collection
+--------------------------------------------------------------------------------
+
+||| Converts a buffer into a list of contained entries.
+|||
+||| Behavior:
+||| - Preserves insertion order.
+||| - Extracts buffered mutation events for rebuild processing.
+|||
+||| Properties:
+||| - O(n).
+||| - Does not modify buffer ownership.
+||| - Pure projection operation.
+|||
+||| Notes:
+||| - Intended for rebuild entry collection.
+|||
+export
+bufferEntries :  Buffer a
+              -> List (Entry a)
+bufferEntries (MkBuffer es _) =
+  cast es
+
+||| Collects entries from multiple extracted buffers.
+|||
+||| Behavior:
+||| - Traverses all buffers.
+||| - Concatenates their entries into a single list.
+|||
+||| Properties:
+||| - O(total entries).
+||| - Preserves per-buffer ordering.
+||| - Does not perform global ordering.
+|||
+||| Notes:
+||| - Intended as a preprocessing step before sorting.
+|||
+export
+collectEntries :  List (Buffer a)
+               -> List (Entry a)
+collectEntries =
+  concatMap bufferEntries
+
+||| Produces a deterministic global ordering of buffered entries.
 |||
 ||| Ordering:
-||| - Entries are sorted using (timestamp, threadid, sequence).
-||| - This guarantees deterministic replay even when timestamps collide.
-|||
-||| Role in LSM design:
-||| - Unit of deferred work.
-||| - Supports deterministic rebuild.
-|||
-public export
-record Entry a where
-  constructor MkEntry
-  operation : Operation a
-  timestamp : IClock CLOCK_REALTIME
-  threadid  : Int
-  sequence  : Nat
-
-public export
-Show a => Show (Entry a) where
-  show (MkEntry operation timestamp threadid sequence) =
-    "MkEntry "                    ++
-    (show operation)              ++
-    " "                           ++
-    (asctime $ fromUTC timestamp) ++
-    " "                           ++
-    (show threadid)               ++
-    " "                           ++
-    (show sequence)
-
-public export
-Eq a => Eq (Entry a) where
-  (MkEntry op1 ts1 tid1 seq1) == (MkEntry op2 ts2 tid2 seq2) =
-       op1   == op2
-    && ts1   == ts2
-    && tid1  == tid2
-    && seq1  == seq2
-
-public export
-Eq (Entry a) => Ord (Entry a) where
-  compare x y =
-    case compare x.timestamp y.timestamp of
-      LT =>
-        LT
-      GT =>
-        GT
-      EQ =>
-        case compare x.threadid y.threadid of
-          LT =>
-            LT
-          GT =>
-            GT
-          EQ =>
-            compare x.sequence y.sequence
-
---------------------------------------------------------------------------------
---          Single Buffer
---------------------------------------------------------------------------------
-
-||| Single append-efficient mutation log.
-|||
-||| Represents one physical mutation buffer.
-|||
-public export
-record Buffer a where
-  constructor MkBuffer
-  entries : SnocList (Entry a)
-  length  : Nat
-
-%runElab derive "Buffer" [Show,Eq]
-
---------------------------------------------------------------------------------
---          Double Buffered Mutation State
---------------------------------------------------------------------------------
-
-||| Thread-local mutation state.
-|||
-||| Writers append only to active.
-|||
-||| During rebuild:
-||| - Active buffers are extracted atomically.
-||| - Ownership transfers to the rebuilder.
-||| - Writers immediately continue on a fresh buffer.
+||| - timestamp
+||| - thread id
+||| - sequence number
 |||
 ||| Properties:
-||| - O(1) amortized append.
-||| - No stop-the-world pauses.
-||| - No shared rebuild ownership.
-|||
-public export
-record WriteBuffers a where
-  constructor MkWriteBuffers
-  active : Buffer a
-
-%runElab derive "WriteBuffers" [Show,Eq]
-
---------------------------------------------------------------------------------
---          Thread Context
---------------------------------------------------------------------------------
-
-||| ThreadContext stores per-thread mutation state.
-|||
-||| Ownership:
-||| - One ThreadContext exists per registered thread.
-|||
-||| Fields:
-||| - threadid <-> Unique thread identifier
-||| - sequence <-> Monotonically increasing local counter used for deterministic ordering
-||| - buffers  <-> Thread-owned double-buffer state
-|||
-||| Properties:
-||| - Per-thread logical ownership.
-||| - Shared registry storage.
-||| - Low-contention write path.
-|||
-public export
-record ThreadContext a where
-  constructor MkThreadContext
-  threadid : Int
-  sequence : Nat
-  buffers  : WriteBuffers a
-
-%runElab derive "ThreadContext" [Show,Eq]
-
---------------------------------------------------------------------------------
---          Background Rebuild State
---------------------------------------------------------------------------------
-
-||| RebuildState represents rebuild thread progress.
-|||
-||| Lifecycle:
-|||
-||| Sleeping
-|||      ↓
-||| RotatingBuffers
-|||      ↓
-||| CollectingEntries
-|||      ↓
-||| SortingEntries
-|||      ↓
-||| PublishingSnapshot
-|||      ↓
-||| Sleeping
-|||
-public export
-data RebuildState
-  = Sleeping
-  | RotatingBuffers
-  | CollectingEntries
-  | SortingEntries
-  | PublishingSnapshot
-
-%runElab derive "RebuildState" [Show,Eq]
-
---------------------------------------------------------------------------------
---          Rebuild Service Messages
---------------------------------------------------------------------------------
-
-||| Requests sent to the rebuild service.
-|||
-||| Trigger:
-||| - Indicates new buffered work exists.
-||| - Marks rebuild work as pending.
-||| - Does not initiate rebuild.
-|||
-||| Flush:
-||| - Forces all pending writes into a published snapshot.
-|||
-public export
-data RebuildRequest
-  = Trigger
-  | Flush
-
-%runElab derive "RebuildRequest" [Show,Eq]
-
---------------------------------------------------------------------------------
---          Rebuild Service Responses
---------------------------------------------------------------------------------
-
-||| Response produced by the rebuild service.
-|||
-||| Trigger:
-||| - Acknowledges notification that buffered work exists.
-||| - Does not imply that a rebuild occurred.
-||| - Multiple Trigger requests may be coalesced.
-|||
-||| Flush:
-||| - Indicates that all currently buffered writes have been incorporated into a published snapshot.
+||| - O(n log n).
+||| - Deterministic across rebuild cycles.
 |||
 ||| Notes:
-||| - Responses currently contain no payload.
-||| - Dependent typing preserves request/response correspondence.
-||| - Future extensions may return rebuild metrics or generation numbers.
+||| - Required before replay to ensure stable behavior under concurrent writes.
 |||
-public export
-RebuildResponse : RebuildRequest -> Type
-RebuildResponse Trigger = ()
-RebuildResponse Flush   = Generation
+export
+sortEntries :  Ord (Entry a)
+            => List (Entry a)
+            -> List (Entry a)
+sortEntries =
+  sort
 
 --------------------------------------------------------------------------------
---          Rebuild Metrics
+--          Replay
 --------------------------------------------------------------------------------
 
-||| Runtime rebuild statistics.
+export
+applyOperation :  Operation a
+               -> RRBVector a
+               -> RRBVector a
+applyOperation (Append x)   v =
+  v |> x
+applyOperation (Prepend x)  v =
+  x <| v
+applyOperation (Insert i x) v =
+  insertAt i x v
+applyOperation (Delete i)   v =
+  deleteAt i v
+applyOperation (Update i x) v =
+  update i x v
+
+export
+replayEntries :  List (Entry a)
+              -> RRBVector a
+              -> RRBVector a
+replayEntries es v =
+  foldl (\acc, e => applyOperation e.operation acc) v es
+
+--------------------------------------------------------------------------------
+--          Reading
+--------------------------------------------------------------------------------
+
+||| Reads the current immutable snapshot together with its generation.
 |||
-||| Metrics are updated after successful rebuild cycles and provide lightweight visibility into rebuild behavior.
+||| Behavior:
+||| - Atomically captures the current SnapshotState.
+||| - Registers the thread as an active reader of that generation.
+||| - Passes (generation, snapshot tree) to the user function.
+||| - Ensures reader registration is cleaned up after evaluation.
 |||
-||| Fields:
-||| - lastbatchsize  <-> Number of entries processed during most recent rebuild.
-||| - totalbatchsize <-> Total number of entries processed across all rebuilds.
-||| - rebuildcount   <-> Number of successful rebuild cycles.
+||| Key property:
+||| - The generation and tree are consistent and taken from the same CAS snapshot.
 |||
-||| Derived values:
-||| - average batch size: totalbatchsize / rebuildcount
+||| This enables:
+||| - Precise visibility reasoning.
+||| - Safe interaction with reclamation.
+||| - Deterministic debugging of snapshot lag.
+|||
+||| Complexity:
+||| - O(log n) for reader registration/removal.
+||| - O(1) snapshot access.
+|||
+export
+readSnapshotWithGeneration :  LSMRRBVector World a
+                           -> ThreadId
+                           -> ((Generation, RRBVector a) -> b)
+                           -> IO b
+readSnapshotWithGeneration rrbvector tid f = do
+  res <- runElinIO readSnapshotWithGeneration'
+  case res of
+    Right res' =>
+      pure res'
+    Left err   =>
+      assert_total $ idris_crash "Data.LSMRRBVector.readSnapshotWithGeneration: \{show err}"
+  where
+    acquire : F1 World (SnapshotState a)
+    acquire = ioToF1 (enterGeneration rrbvector.combinedsnapshotstate tid)
+    use :  SnapshotState a
+        -> F1 World b
+    use snapshot t =
+      let gen := snapshot.generation
+        in f (gen, snapshot.tree) # t
+    release :  SnapshotState a
+            -> F1' World
+    release _ = ioToF1 (leaveGeneration rrbvector.combinedsnapshotstate tid)
+    readSnapshotWithGeneration' : Elin World [Errno] b
+    readSnapshotWithGeneration' =
+      bracket (runIO acquire)
+              (\snapshot => runIO (use snapshot))
+              (\snapshot => runIO (release snapshot))
+
+--------------------------------------------------------------------------------
+--          Metrics Queries
+--------------------------------------------------------------------------------
+
+||| Returns current rebuild metrics.
 |||
 ||| Properties:
-||| - Updated only by the rebuild worker.
+||| - O(1)
+||| - Snapshot of current service state
+|||
+export
+rebuildMetrics :  RebuildServiceState
+               -> RebuildMetrics
+rebuildMetrics st =
+  st.rebuildmetrics
+
+||| Returns average rebuild batch size.
+|||
+||| Properties:
+||| - O(1)
+|||
+export
+averageRebuildBatchSize :  RebuildServiceState
+                        -> Nat
+averageRebuildBatchSize st =
+  averageBatchSize st.rebuildmetrics
+
+--------------------------------------------------------------------------------
+--          Adaptive Batching
+--------------------------------------------------------------------------------
+
+||| Adjusts adaptive batching window according to observed write pressure.
+|||
+||| Rules:
+||| - Pressure above the current window expands the window.
+||| - Pressure below half the current window shrinks the window.
+||| - Window never shrinks below 1.
+|||
+||| Properties:
+||| - Pure deterministic policy function.
 ||| - Does not affect correctness.
-||| - Intended for observability and adaptive tuning.
+||| - Only influences rebuild batching behavior.
 |||
-public export
-record RebuildMetrics where
-  constructor MkRebuildMetrics
-  lastbatchsize  : Nat
-  totalbatchsize : Nat
-  rebuildcount   : Nat
-
-%runElab derive "RebuildMetrics" [Show,Eq]
+export
+adjustBatchWindow :  Nat
+                  -> Nat
+                  -> Nat
+adjustBatchWindow pressure window =
+  case pressure > window of
+    True  =>
+      window * 2
+    False =>
+      case pressure < (window `div` 2) of
+        True  =>
+          max 1 (window `div` 2)
+        False =>
+          window
 
 --------------------------------------------------------------------------------
---          Rebuild Service State
+--          Publication
 --------------------------------------------------------------------------------
 
-||| Controls execution of rebuild-cycle progress.
+||| Atomically publishes a rebuilt snapshot and advances adaptive batching state.
 |||
-||| Fields:
-||| - rebuildphase: Current phase of the rebuild pipeline.
-||| - rebuildmetrics: Runtime rebuild statistics.
+||| Steps:
+||| - Publish rebuilt immutable tree.
+||| - Increment snapshot generation.
+||| - Retire previous snapshot.
+||| - Reset accumulated write pressure.
+||| - Clear rebuild pending state.
+||| - Adaptively adjust batching window.
 |||
 ||| Properties:
-||| - Local service execution state only.
-||| - Mutable only by the rebuild worker.
-||| - Represents execution progress rather than global vector state.
+||| - Snapshot publication is atomic.
+||| - Readers always observe a consistent snapshot/generation pair.
+||| - Adaptive batching state transitions are globally visible atomically.
+||| - Previous snapshots become eligible for reclamation.
 |||
 ||| Notes:
-||| - Pending rebuild work is tracked globally through CombinedSnapshotState.rebuildpending.
-||| - Failure state is intentionally omitted.
-||| - Current rebuild operations are total and crash on unrecoverable runtime failures rather than persisting structured errors.
+||| - Adaptive batching decisions are based on write pressure observed since the previous successful publication.
 |||
-public export
-record RebuildServiceState where
-  constructor MkRebuildServiceState
-  rebuildphase   : RebuildState
-  rebuildmetrics : RebuildMetrics
-
-%runElab derive "RebuildServiceState" [Show,Eq]
+export
+publishSnapshot :  Ref World (CombinedSnapshotState a)
+                -> List (Entry a)
+                -> IO Generation
+publishSnapshot combinedsnapshotstateref entries =
+  update combinedsnapshotstateref (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending batchwindow) =>
+                                    let rebuilt    = replayEntries entries snapshot.tree
+                                        newgen     = S snapshot.generation
+                                        snapshot'  = MkSnapshotState newgen rebuilt
+                                        retired'   = MkRetiredSnapshot snapshot.generation snapshot.tree :: retired
+                                        nextwindow = adjustBatchWindow writepressure batchwindow
+                                      in ( MkCombinedSnapshotState snapshot' retired' readers 0 False nextwindow
+                                         , newgen
+                                         )
+                                  )
 
 --------------------------------------------------------------------------------
---          Reader State
+--          Reclamation Utilities
 --------------------------------------------------------------------------------
 
-||| Reader participation in generation tracking.
+||| Computes the newest retired generation that may safely be reclaimed.
 |||
-||| Readers announce the snapshot generation currently being observed.
+||| Behavior:
+||| - Determines the oldest snapshot generation currently referenced by active readers.
+||| - Finds the highest retired generation strictly older than that reader boundary.
+||| - Returns Nothing when no reclaimable generation exists.
+|||
+||| Returns:
+||| - Nothing: No readers exist, or no retired snapshots can be reclaimed.
+|||
+||| - Just g: Every retired snapshot with generation <= g may safely be reclaimed.
+|||
+||| Safety rules:
+||| - Readers observing generation G may still require snapshot G.
+||| - Readers may also require all newer generations.
+||| - Only snapshots strictly older than the oldest active reader generation are reclaimable.
+|||
+||| Example:
+|||
+||| Retired              <-> [1,2,3,4,5]
+||| Active readers       <-> [4,7]
+||| oldest active reader <-> 4
+||| Safe reclamation     <-> [1,2,3]
+||| Result               <-> Just 3
 |||
 ||| Properties:
-||| - Updated only when entering/leaving a snapshot read section.
-||| - Used by reclamation to determine oldest active generation.
-||| - One entry per participating thread.
+||| - O(number of retired snapshots + number of readers).
+||| - Never reclaims a snapshot visible to any active reader.
+||| - Computes a maximal safe reclamation boundary.
 |||
-public export
-record ReaderState where
-  constructor MkReaderState
-  generation : Generation
+export
+reclamationCutoff :
+     List (RetiredSnapshot a)
+  -> SortedMap ThreadId ReaderState
+  -> Maybe Generation
+reclamationCutoff retired readers =
+  case minimumGeneration readers of
+    Nothing =>
+      Nothing
+    Just oldest =>
+      case map generation ( filter
+                             (\snap =>
+                               snap.generation < oldest)
+                            retired
+                          ) of
+
+        []      =>
+          Nothing
+        x :: xs =>
+          Just (foldl max x xs)
 
 --------------------------------------------------------------------------------
---          Snapshot State
+--          Reclamation
 --------------------------------------------------------------------------------
 
-||| Immutable published snapshot state.
+||| Reclaims retired snapshots no longer visible to active readers.
 |||
-||| Represents the currently visible version of the vector.
+||| Rules:
+||| - No readers: Reclaim everything.
+||| - Readers exist: retain snapshots at or newer than the oldest active reader boundary.
 |||
-||| Fields:
-||| - generation <-> Monotonic snapshot version identifier
-||| - tree       <-> Immutable published RRB snapshot
+||| Properties:
+||| - Safe generation-based reclamation.
+||| - Keeps only snapshots potentially observable by readers.
+||| - O(number of retired snapshots + number of readers).
 |||
-||| Publication properties:
-||| - Tree and generation are published atomically.
-||| - Readers always observe a consistent snapshot pair.
-||| - Eliminates visibility races between tree updates and generation updates.
+export
+reclaimSnapshots :  Ref World (CombinedSnapshotState a)
+                 -> IO ()
+reclaimSnapshots combinedsnapshotstate =
+  mod combinedsnapshotstate (\(MkCombinedSnapshotState snapshot retired readers writepressure rebuildpending batchwindow) =>
+                              let survivors = case reclamationCutoff retired readers of
+                                                Nothing     =>
+                                                  case minimumGeneration readers of
+                                                    Nothing =>
+                                                      []
+                                                    Just _  =>
+                                                      retired
+                                                Just cutoff =>
+                                                  filter (\snap =>
+                                                           snap.generation > cutoff
+                                                         ) retired
+                                in MkCombinedSnapshotState snapshot survivors readers writepressure rebuildpending batchwindow
+                            )
+
+--------------------------------------------------------------------------------
+--          Single Rebuild Cycle
+--------------------------------------------------------------------------------
+
+||| Executes one rebuild pass.
 |||
-||| Lifecycle:
+||| Steps:
+||| - Rotate all active buffers.
+||| - Collect extracted entries.
+||| - Sort entries deterministically.
+||| - Publish rebuilt snapshot.
+||| - Reclaim retired snapshots.
 |||
-||| rebuild
-|||     ↓
-||| new snapshot tree
-|||     ↓
-||| increment generation
-|||     ↓
-||| atomic publication
-|||     ↓
-||| visible to readers
+||| Returns:
+||| - Published generation when work exists.
+||| - 0 when no publication occurred.
+||| - Whether any entries were processed.
 |||
 ||| Notes:
-||| - SnapshotState is immutable once constructed.
-||| - Publication occurs by replacing the whole record.
-|||
-public export
-record SnapshotState a where
-  constructor MkSnapshotState
-  generation : Generation
-  tree       : RRBVector a
-
---------------------------------------------------------------------------------
---          Retired Snapshot
---------------------------------------------------------------------------------
-
-||| Snapshot awaiting reclamation.
-|||
-||| A snapshot becomes retired after publication of a newer snapshot.
-|||
-||| Properties:
-||| - Immutable after retirement.
-||| - Safe to reclaim once no reader references its generation.
-|||
-public export
-record RetiredSnapshot a where
-  constructor MkRetiredSnapshot
-  generation : Generation
-  tree       : RRBVector a
-
---------------------------------------------------------------------------------
---          Combined Snapshot State
---------------------------------------------------------------------------------
-
-||| Combined snapshot publication, reclamation, and batching state.
-|||
-||| Fields:
-||| - currentsnapshot: Current published immutable snapshot.
-||| - retiredsnapshots: Older snapshots awaiting reclamation.
-||| - readerstate: Active reader generation announcements.
-||| - writepressure: Number of writes accumulated since the last rebuild cycle.
-||| - rebuildpending: Indicates whether buffered work exists requiring rebuild.
-||| - batchwindow: Current adaptive rebuild target controlling how many writes are accumulated before rebuild behavior expands or contracts.
-|||
-||| Properties:
-||| - Updated atomically through CAS.
-||| - Shared between readers, writers, and rebuilder.
-||| - Adaptive batching decisions observe a globally consistent state.
-|||
-public export
-record CombinedSnapshotState a where
-  constructor MkCombinedSnapshotState
-  currentsnapshot  : SnapshotState a
-  retiredsnapshots : List (RetiredSnapshot a)
-  readerstate      : SortedMap ThreadId ReaderState
-  writepressure    : Nat
-  rebuildpending   : Bool
-  batchwindow      : Nat
-
---------------------------------------------------------------------------------
---          RebuildService
---------------------------------------------------------------------------------
-
-||| A managed effectful resource that can be started inside Async,
-||| but stored purely in data structures.
-|||
-{-
-public export
-record ManagedService (e : Type) (req : Type) (resp : req -> Type) where
-  constructor MkManagedService
-  run : Async e [] (Service e [] req resp)
--}
-public export
-record RebuildService (0 e : Type) where
-  constructor MkRebuildService
-  run : RebuildRequest -> Async e [Errno] ()
-
-||| Creates a snapshot-rebuilding service.
-|||
-||| To make this available to many fibers, this is run as a service
-||| in the background using an internal buffer that can hold up to
-||| `capacity` messages.
+||| - Performs exactly one ownership-transfer cycle.
+||| - Does not guarantee complete draining.
 |||
 export covering
-rebuilder :  (sendrebuildrequest : RebuildRequest -> Async e [Errno] ())
-          -> Async e es (RebuildService e)
-rebuilder sendrebuildrequest = do
-  srv <- stateless (const ()) sendRebuildRequest
-  pure $ MkRebuildService (send srv . (const Trigger))
-  where
-    sendRebuildRequest :  RebuildRequest
-                       -> Async e [Errno] ()
-    sendRebuildRequest req = sendrebuildrequest req
+rebuildOnce :  Ord (Entry a)
+            => Show (SortedMap Int (ThreadContext a))
+            => Show (List (Buffer a))
+            => Ref World (SortedMap Int (ThreadContext a))
+            -> Ref World (CombinedSnapshotState a)
+            -> RebuildServiceState
+            -> Async Poll [Errno] (RebuildServiceState, Generation, Bool)
+rebuildOnce buffers combinedsnapshotstate st = do
+  -- RotatingBuffers
+  let st1        : RebuildServiceState
+      st1        = { rebuildphase := RotatingBuffers } st
+  liftIO (putStrLn "before rotateAllBuffers.")
+  buffers' <- readref buffers
+  liftIO (putStrLn $ show buffers')
+  extracted      <- liftIO (rotateAllBuffers buffers)
+  buffers'' <- readref buffers
+  liftIO (putStrLn $ show buffers'')
+  liftIO (putStrLn $ show extracted)
+  -- CollectingEntries
+  let st2        : RebuildServiceState
+      st2        = { rebuildphase := CollectingEntries } st1
+      entries    = collectEntries extracted
+      batchsize  = length entries
+  case isNil entries of
+    True  => do
+      let st' = { rebuildphase := Sleeping } st2
+      pure (st', 0, False)
+    False => do
+      -- SortingEntries
+      let st3 : RebuildServiceState
+          st3 = { rebuildphase := SortingEntries
+                } st2
+          sorted = sortEntries entries
+      -- PublishingSnapshot
+      let st4    : RebuildServiceState
+          st4    = { rebuildphase := PublishingSnapshot } st3
+      generation <- liftIO (publishSnapshot combinedsnapshotstate sorted)
+      liftIO (reclaimSnapshots combinedsnapshotstate)
+      let st5    : RebuildServiceState
+          st5    = { rebuildphase := Sleeping
+                   , rebuildmetrics := updateMetrics st4.rebuildmetrics batchsize
+                   } st4
+      pure (st5, generation, True)
 
 --------------------------------------------------------------------------------
---          Log Structured Merge RRB Vector
+--          Flush Until Empty
 --------------------------------------------------------------------------------
 
-||| Concurrent LSM-style vector built from:
-||| - Per-thread mutation state.
-||| - Immutable snapshot generations.
-||| - Background rebuild service.
-||| - Generation-based reclamation.
+||| Repeatedly performs rebuild cycles until a rotation extracts no work.
 |||
-||| Write path:
+||| Behavior:
+||| - Executes rebuild cycles in sequence.
+||| - Each cycle atomically rotates ownership of active buffers.
+||| - Extracted entries are rebuilt into a published snapshot.
+||| - Terminates once a rotation produces no extracted entries.
 |||
-||| Thread
-|||    ↓
-||| Operation
-|||    ↓
-||| Entry
-|||    ↓
-||| ThreadContext
-|||    ↓
-||| active buffer
+||| Visibility guarantees:
+||| - Flush establishes a quiescent visibility boundary at buffer rotation.
+||| - All writes already present in rotated buffers are incorporated before completion.
+||| - Writes arriving concurrently may appear either before or after completion depending on timing.
+||| - Flush does not stop writers or establish a global synchronization barrier.
 |||
-||| Rebuild path:
+||| Concurrency properties:
+||| - Writers continue appending during rebuild execution.
+||| - Multiple rebuild cycles may be required if writes continue arriving.
+||| - Progress remains lock-free for writers.
 |||
-||| Rotate active/frozen
-|||        ↓
-||| Collect frozen buffers
-|||        ↓
-||| Sort Entries
-|||        ↓
-||| Apply Operations
-|||        ↓
-||| Build snapshot
-|||        ↓
-||| Publish snapshot
-|||        ↓
-||| Retire previous snapshot
-|||        ↓
-||| Reclaim old generations
+||| Returns:
+||| - Final rebuild state.
+||| - Most recently published generation.
 |||
-||| Fields:
-||| - buffers               <-> Thread-local mutation state
-||| - combinedsnapshotstate <-> Published snapshot + retired snapshots + reader tracking
-||| - rebuildscheduled      <-> Producer-side scheduling boolean
-||| - rebuilder             <-> Background rebuild service
+||| Notes:
+||| - Completion means no buffered work was visible during the final rotation.
+||| - This is weaker than "all writes before return".
+||| - Stronger linearizable flush semantics would require an explicit epoch or barrier mechanism.
 |||
-||| Properties:
-||| - O(1) amortized writes
-||| - Read-stable immutable snapshots
-||| - No stop-the-world pauses
-||| - Safe generation-based reclamation
-||| - Deterministic rebuild ordering
-|||
-public export
-record LSMRRBVector s e es a where
-  constructor MkLSMRRBVector
-  buffers               : Ref s (SortedMap ThreadId (ThreadContext a))
-  combinedsnapshotstate : Ref s (CombinedSnapshotState a)
-  rebuildscheduled      : Ref s Bool
-  --rebuilder             : ManagedService e RebuildRequest RebuildResponse
-  --rebuildservice        : IO () -- Async e es (RebuildService e)
-  rebuildservice        : Async e es (RebuildService e)
+export covering
+flushUntilEmpty :  Ord (Entry a)
+                => Show (SortedMap Int (ThreadContext a))
+                => Show (List (Buffer a))
+                => Ref World (SortedMap Int (ThreadContext a))
+                -> Ref World (CombinedSnapshotState a)
+                -> RebuildServiceState
+                -> Async Poll [Errno] (RebuildServiceState, Generation)
+flushUntilEmpty buffers combinedsnapshotstate st =
+  let loop :  RebuildServiceState
+           -> Generation
+           -> Async Poll [Errno] (RebuildServiceState, Generation)
+      loop st lastgen = do
+        (st', gen, hadentries) <- rebuildOnce buffers combinedsnapshotstate st
+        case hadentries of
+          True  =>
+            loop st' gen
+          False =>
+            pure (st', gen)
+    in loop st 0
 
 --------------------------------------------------------------------------------
---          Configuration
+--          Rebuilder Service
 --------------------------------------------------------------------------------
 
-||| Configuration controlling rebuild and adaptive batching behavior.
+||| Processes a rebuild request issued by the LSM write system.
 |||
-||| Fields:
-||| - initialbatchwindow: Initial adaptive batching target used before runtime adjustments occur.
+||| This service is responsible for advancing the immutable snapshot from the accumulated thread-local mutation buffers.
 |||
-||| Properties:
-||| - Does not affect correctness.
-||| - Influences rebuild latency/throughput tradeoffs.
-||| - Serves as the starting point for adaptive window adjustment.
+||| Two modes of operation exist:
 |||
-||| Typical values:
-||| - 16–64: Lower latency, more frequent rebuilds.
-||| - 64–256: Balanced throughput and latency.
-||| - 256+: Higher throughput under sustained write load.
+||| Trigger:
+||| - Requests background progression toward publication.
+||| - May coalesce multiple requests.
+||| - Performs at most one rebuild cycle.
+||| - May or may not publish a new snapshot.
 |||
-public export
-record LSMRRBVectorConfig where
-  constructor MkLSMRRBVectorConfig
-  initialbatchwindow : Nat
+||| Flush:
+||| - Repeatedly performs rebuild cycles until all buffered writes observed at invocation time are incorporated.
+||| - Guarantees that all writes visible in rotated buffers during draining are reflected in the returned generation.
+||| - Concurrent writes may be incorporated either before or after completion.
+||| - May perform multiple rotations and publications internally.
+|||
+||| Concurrency guarantees:
+||| - Writers may continue appending during rebuild.
+||| - Flush only guarantees completeness relative to a quiescent cut of buffer rotation visibility.
+|||
+||| Return values:
+||| - Trigger returns unit acknowledgement.
+||| - Flush returns the final snapshot generation after draining.
+|||
+||| State transitions:
+||| Sleeping → RotatingBuffers → CollectingEntries → SortingEntries → PublishingSnapshot → Sleeping
+|||
+||| Notes:
+||| - Empty rebuild cycles do not advance generation.
+||| - Flush drains until a cycle produces no entries.
+||| - Trigger is a bounded operation, Flush is unbounded (but finite under quiescent assumptions).
+|||
+export covering
+handleRebuildRequest :  Ord (Entry a)
+                     => Show (SortedMap Int (ThreadContext a))
+                     => Show (List (Buffer a))
+                     => LSMRRBVector World a
+                     -> RebuildServiceState
+                     -> (req : RebuildRequest)
+                     -> Async Poll [Errno] ()
+              --       -> Async e [] (RebuildServiceState, RebuildResponse req)
+handleRebuildRequest lsmrrbvector st Trigger = do
+  liftIO (print "before rebuildOnce")
+  (_, _, _) <- rebuildOnce lsmrrbvector.buffers lsmrrbvector.combinedsnapshotstate st
+  liftIO (print "after rebuildOnce")
+  liftIO (mod lsmrrbvector.rebuildscheduled (const False))
+  let st' : RebuildServiceState
+      st' = { rebuildphase := Sleeping
+            } st
+  pure ()
+handleRebuildRequest lsmrrbvector st Flush = do
+  (_, generation) <- flushUntilEmpty lsmrrbvector.buffers lsmrrbvector.combinedsnapshotstate st
+  liftIO (mod lsmrrbvector.rebuildscheduled (const False))
+  let st' : RebuildServiceState
+      st' = { rebuildphase := Sleeping
+            } st
+  pure ()
+
+--------------------------------------------------------------------------------
+--          Rebuild Service
+--------------------------------------------------------------------------------
+
+export covering
+rebuilderService :  Ord (Entry a)
+                 => Show (SortedMap Int (ThreadContext a))
+                 => Show (List (Buffer a))
+                 => LSMRRBVector World a
+                 -> RebuildServiceState
+                 -> (LSMRRBVector World a -> RebuildService Poll -> IO ())
+            --     -> (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+                 -> Async Poll [Errno] ()
+rebuilderService lsmrrbvector st action = do
+  rebuilderservice <-
+    rebuilder
+      (\req => handleRebuildRequest lsmrrbvector st req)
+  liftIO $
+    action lsmrrbvector rebuilderservice
+
+--------------------------------------------------------------------------------
+--          LSMRRBVector Service
+--------------------------------------------------------------------------------
+
+export covering
+lsmrrbvectorService :  LSMRRBVector World a
+                    -> (LSMRRBVector World a -> IO ())
+                    -> Async Poll [Errno] ()
+lsmrrbvectorService lsmrrbvector action =
+  liftIO $
+    action lsmrrbvector
+
+--------------------------------------------------------------------------------
+--          Rebuild And LSMRRBVector Service
+--------------------------------------------------------------------------------
+
+export covering
+rebuilderAndLSMRRBVectorService :  Async Poll [Errno] ()
+                                -> Async Poll [Errno] ()
+                                -> Async Poll [Errno] ()
+rebuilderAndLSMRRBVectorService rebuilderservice lsmrrbvectorservice =
+  race_
+    [ -- rebuilder (writer) service
+      --rebuilderservice
+      liftIO (app (Element (the Nat 1) %search) [SIGINT] posixPoller $ handle handlers rebuilderservice)
+    , -- lsmrrbvector (reader) service
+      lsmrrbvectorservice
+    ]
+   where
+    handlers : All (Handler () Poll) [Errno]
+    handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]

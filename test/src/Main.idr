@@ -7,7 +7,7 @@ import NoReadersReclaimsEverything
 import NWritersMReaders
 import ReaderAtGeneration3
 import ReaderDoesNotPinAncientGenerations
---import ReadSnapshotStable
+import ReadSnapshotStable
 import RegisterThreadReuse
 import ReplayProducesExpectedVector
 import RetiredSnapshotCreated
@@ -24,6 +24,6 @@ main = do
   () <- test_NoReadersReclaimsEverything
   () <- test_ReaderAtGeneration3
   () <- test_ReaderDoesNotPinAncientGenerations
-  --() <- test_ReadSnapshotStable
+  () <- test_ReadSnapshotStable
   () <- test_HeavyAppendLoad
-  test_NWritersMReaders_run
+  test_NWritersMReaders
