@@ -24,7 +24,7 @@ export
 test_ReadSnapshotStable : IO ()
 test_ReadSnapshotStable =
   runEmptyWith (MkLSMRRBVectorConfig 8)
-               [ (\_, _ => pure ())
+               [ (\_, _, _ => pure ())
                ]
                [ (\vec : LSMRRBVector World Int => do
                    xs <- liftIO $ readSnapshotWithGeneration vec 1 (\(_, tree) => Data.RRBVector.toList tree)

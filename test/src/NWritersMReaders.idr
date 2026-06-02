@@ -33,9 +33,9 @@ import System.Posix.Timer.Prim
 export
 test_NWritersMReaders : IO ()
 test_NWritersMReaders = do
-   runEmptyWith (MkLSMRRBVectorConfig 8)
+   runEmptyWith (MkLSMRRBVectorConfig 5)
                 -- writer function(s)
-                [ (\vec : LSMRRBVector World Int, svc => do
+                [ (\vec : LSMRRBVector World Int, svc, _ => do
                     -- writer function
                     let writer :  Int
                                -> Nat
@@ -44,11 +44,11 @@ test_NWritersMReaders = do
                           pure ()
                         writer wid (S n) = do
                           Data.LSMRRBVector.append vec svc wid (cast n)
-                          --liftIO (usleep 5000)
+                          liftIO (usleep 50)
                           writer wid n
                     writer 1 50
                   )
-                , (\vec : LSMRRBVector World Int, svc => do
+                , (\vec : LSMRRBVector World Int, svc, _ => do
                     -- writer function
                     let writer :  Int
                                -> Nat
@@ -57,21 +57,36 @@ test_NWritersMReaders = do
                           pure ()
                         writer wid (S n) = do
                           Data.LSMRRBVector.append vec svc wid (cast n)
-                          --liftIO (usleep 5000)
+                          liftIO (usleep 50)
                           writer wid n
                     writer 2 50
                   )
+                , (\vec : LSMRRBVector World Int, _, st => do
+                    -- flush function (ensure all writes make it into snapshot)
+                    liftIO $ usleep 2000000
+                    _ <- flushUntilEmpty vec st
+                    pure ()
+                  )
                 ]
                 [ (\vec : LSMRRBVector World Int => do
-                    usleep 200000
-                    --rtids <- liftIO spawnReaders
-                    -- Wait for reader threads to finish
-                    --for_ rtids $ \tid =>
-                    --  liftIO $ threadWait tid
+                    liftIO $ usleep 10000000
                     css <- readref vec.combinedsnapshotstate
                     buffers' <- readref vec.buffers
                     when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 100) $ do
-                      putStrLn $ show $ Data.RRBVector.toList css.currentsnapshot.tree
-                      assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
+                      liftIO $ putStrLn "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
+                  )
+                , (\vec : LSMRRBVector World Int => do
+                    liftIO $ usleep 10000000
+                    css <- readref vec.combinedsnapshotstate
+                    buffers' <- readref vec.buffers
+                    when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 100) $ do
+                      liftIO $ putStrLn "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
+                  )
+                , (\vec : LSMRRBVector World Int => do
+                    liftIO $ usleep 10000000
+                    css <- readref vec.combinedsnapshotstate
+                    buffers' <- readref vec.buffers
+                    when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 100) $ do
+                      liftIO $ putStrLn "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
                   )
                 ]

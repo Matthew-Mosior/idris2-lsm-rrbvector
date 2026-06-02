@@ -20,6 +20,7 @@ import Syntax.T1 as T1
 --------------------------------------------------------------------------------
 
 ||| Convenience interface for bitSize that doesn't use an implicit parameter.
+|||
 private
 bitSizeOf :  (ty : Type)
           -> FiniteBits ty
@@ -35,16 +36,19 @@ Shift : Type
 Shift = Nat
 
 ||| The number of bits used per level.
+|||
 export
 blockshift : Shift
 blockshift = 4
 
 ||| The maximum size of a block.
+|||
 export
 blocksize : Nat
 blocksize = integerToNat $ 1 `shiftL` blockshift
 
 ||| The mask used to extract the index into the array.
+|||
 export
 blockmask : Nat
 blockmask = minus blocksize 1
@@ -105,6 +109,7 @@ relaxedRadixIndex sizes i sh =
 --------------------------------------------------------------------------------
 
 ||| An internal tree representation.
+|||
 public export
 data Tree a = Balanced (Array (Tree a))
             | Unbalanced (Array (Tree a)) (Array Nat)
@@ -115,6 +120,7 @@ data Tree a = Balanced (Array (Tree a))
 --------------------------------------------------------------------------------
 
 ||| Is the tree empty? O(1)
+|||
 private
 null :  Tree a
      -> Bool
@@ -262,6 +268,7 @@ treeBalanced (Leaf _)         =
   True
 
 ||| Computes the size of a tree with shift.
+|||
 export
 treeSize :  Shift
          -> Tree a
@@ -294,6 +301,7 @@ treeSize = go 0
 
 ||| Turns an array into a tree node by computing the sizes of its subtrees.
 ||| sh is the shift of the resulting tree.
+|||
 export
 computeSizes :  Shift
              -> Array (Tree a)
@@ -368,6 +376,7 @@ countTrailingZeros x =
                   assert_total $ go (plus i 1)
 
 ||| Nat log base 2.
+|||
 export
 log2 :  Nat
      -> Nat
@@ -403,6 +412,7 @@ log2 x =
 
 ||| A relaxed radix balanced vector (RRBVector).
 ||| It supports fast indexing, iteration, concatenation and splitting.
+|||
 public export
 data RRBVector a = Root Nat   -- size
                         Shift -- shift (blockshift * height)

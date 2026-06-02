@@ -41,17 +41,20 @@ infixl 5 |>
 --------------------------------------------------------------------------------
 
 ||| The empty vector. O(1)
+|||
 export
 empty : RRBVector a
 empty = Empty
 
 ||| A vector with a single element. O(1)
+|||
 export
 singleton :  a
           -> RRBVector a
 singleton x = Root 1 0 (Leaf $ A 1 $ fill 1 x)
 
 ||| Create a new vector from a list. O(n)
+|||
 export
 fromList :  List a
          -> RRBVector a
@@ -135,6 +138,7 @@ fromList xs  =
           iterateNodes (up sh) (assert_smaller trees trees')
 
 ||| Creates a vector of length n with every element set to x. O(log n)
+|||
 export
 replicate :  Nat
           -> a
@@ -180,6 +184,7 @@ replicate n x =
 --------------------------------------------------------------------------------
 
 ||| Convert a vector to a list. O(n)
+|||
 export
 toList :  RRBVector a
        -> List a
@@ -237,6 +242,7 @@ foldr f acc = go
 --------------------------------------------------------------------------------
 
 ||| Is the vector empty? O(1)
+|||
 export
 null :  RRBVector a
      -> Bool
@@ -244,6 +250,7 @@ null Empty = True
 null _     = False
 
 ||| Return the size of a vector. O(1)
+|||
 export
 length :  RRBVector a
        -> Nat
@@ -255,6 +262,7 @@ length (Root s _ _) = s
 --------------------------------------------------------------------------------
 
 ||| The element at the index or Nothing if the index is out of range. O(log n)
+|||
 export
 lookup :  Nat
        -> RRBVector a
@@ -308,6 +316,7 @@ lookup i (Root size sh tree) =
 
 ||| The element at the index.
 ||| Calls 'idris_crash' if the index is out of range. O(log n)
+|||
 export
 index :  Nat
       -> RRBVector a
@@ -315,6 +324,7 @@ index :  Nat
 index i = fromMaybe (assert_total $ idris_crash "Data.RRBVector.index: index out of range") . lookup i
 
 ||| A flipped version of lookup. O(log n)
+|||
 export
 (!?) :  RRBVector a
      -> Nat
@@ -322,6 +332,7 @@ export
 (!?) = flip lookup
 
 ||| A flipped version of index. O(log n)
+|||
 export
 (!!) :  RRBVector a
      -> Nat
@@ -330,6 +341,7 @@ export
 
 ||| Update the element at the index with a new element.
 ||| If the index is out of range, the original vector is returned. O (log n)
+|||
 export
 update :  Nat
        -> a
@@ -384,6 +396,7 @@ update i x v@(Root size sh tree) =
 
 ||| Adjust the element at the index by applying the function to it.
 ||| If the index is out of range, the original vector is returned. O(log n)
+|||
 export
 adjust :  Nat
        -> (a -> a)
@@ -467,6 +480,7 @@ normalize v                                   =
   v
 
 ||| The initial i is n - 1 (the index of the last element in the new tree).
+|||
 private
 takeTree :  Nat
          -> Shift
@@ -525,6 +539,7 @@ dropTree n _  (Leaf arr) =
 
 ||| The first i elements of the vector.
 ||| If the vector contains less than or equal to i elements, the whole vector is returned. O(log n)
+|||
 export
 take :  Nat
      -> RRBVector a
@@ -547,6 +562,7 @@ take n v@(Root size sh tree) =
 
 ||| The vector without the first i elements.
 ||| If the vector contains less than or equal to i elements, the empty vector is returned. O(log n)
+|||
 export
 drop :  Nat
      -> RRBVector a
@@ -568,6 +584,7 @@ drop n v@(Root size sh tree) =
           empty
 
 ||| Split the vector at the given index. O(log n)
+|||
 export
 splitAt :  Nat
         -> RRBVector a
@@ -595,6 +612,7 @@ splitAt n v@(Root size sh tree) =
 --------------------------------------------------------------------------------
 
 ||| The first element and the vector without the first element, or 'Nothing' if the vector is empty. O(log n)
+|||
 export
 viewl :  RRBVector a
       -> Maybe (a, RRBVector a)
@@ -624,6 +642,7 @@ viewl v@(Root _ _ tree) =
           at arr.arr zero
 
 ||| The vector without the last element and the last element, or 'Nothing' if the vector is empty. O(log n)
+|||
 export
 viewr :  RRBVector a
       -> Maybe (RRBVector a, a)
@@ -657,6 +676,7 @@ viewr v@(Root size _ tree) =
 --------------------------------------------------------------------------------
 
 ||| Apply the function to every element. O(n)
+|||
 export
 map :  (a -> b)
     -> RRBVector a
@@ -673,6 +693,7 @@ map f (Root size sh tree) = Root size sh (mapTree tree)
       Leaf (map f arr)
 
 ||| Reverse the vector. O(n)
+|||
 export
 reverse :  RRBVector a
         -> RRBVector a
@@ -691,6 +712,7 @@ reverse v =
 
 ||| Take two vectors and return a vector of corresponding pairs.
 ||| If one input is longer, excess elements are discarded from the right end. O(min(n1,n2))
+|||
 export
 zip :  RRBVector a
     -> RRBVector b
@@ -711,6 +733,7 @@ zip v1 v2 =
 --------------------------------------------------------------------------------
 
 ||| Create a new tree with shift sh.
+|||
 private
 newBranch :  a
           -> Shift
@@ -719,6 +742,7 @@ newBranch x 0  = Leaf (singleton x)
 newBranch x sh = assert_total $ Balanced (singleton $ newBranch x (down sh))
 
 ||| Add an element to the left end of the vector. O(log n)
+|||
 export
 (<|) :  a
      -> RRBVector a
@@ -834,6 +858,7 @@ x <| Root size sh tree =
       Leaf (A (S arr.size) (append (fill 1 x) arr.arr))
 
 ||| Add an element to the right end of the vector. O(log n)
+|||
 export
 (|>) :  RRBVector a
      -> a
@@ -956,6 +981,7 @@ Root size sh tree |> x =
     snocTree _ (Leaf arr) = Leaf (A (plus arr.size 1) (append arr.arr (fill 1 x)))
 
 ||| Concatenates two vectors. O(log(max(n1,n2)))
+|||
 export
 (><) :  RRBVector a
      -> RRBVector a
@@ -1148,6 +1174,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
 ||| Insert an element at the given index, shifting the rest of the vector over.
 ||| If the index is negative, add the element to the left end of the vector.
 ||| If the index is bigger than or equal to the length of the vector, add the element to the right end of the vector. O(log n)
+|||
 export
 insertAt :  Nat
          -> a
@@ -1159,6 +1186,7 @@ insertAt i x v =
 
 ||| Delete the element at the given index.
 ||| If the index is out of range, return the original vector. O(log n)
+|||
 export
 deleteAt :  Nat
          -> RRBVector a
@@ -1172,6 +1200,7 @@ deleteAt i v =
 --------------------------------------------------------------------------------
 
 ||| Show the full representation of the vector.
+|||
 export
 showRRBVectorRep :  Show a
                  => Show (Tree a)

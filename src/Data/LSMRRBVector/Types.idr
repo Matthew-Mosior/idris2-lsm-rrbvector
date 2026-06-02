@@ -35,13 +35,9 @@ import System.Posix.Timer.Prim
 ||| - Marks rebuild work as pending.
 ||| - Does not initiate rebuild.
 |||
-||| Flush:
-||| - Forces all pending writes into a published snapshot.
-|||
 public export
 data RebuildRequest
   = Trigger
-  | Flush
 
 %runElab derive "RebuildRequest" [Show,Eq]
 
@@ -469,6 +465,34 @@ record CombinedSnapshotState a where
 --          Log Structured Merge RRB Vector
 --------------------------------------------------------------------------------
 
+||| A concurrent log-structured sequence built on immutable RRBVector snapshots.
+|||
+||| Architecture:
+||| - Writers append deferred mutations into thread-local buffers.
+||| - Readers access immutable published snapshots.
+||| - A background rebuilder periodically merges buffered mutations into a new RRBVector snapshot.
+|||
+||| Concurrency model:
+||| - Readers never block writers.
+||| - Writers never mutate published snapshots.
+||| - Snapshot publication occurs atomically.
+||| - Retired snapshots are reclaimed using generation tracking.
+|||
+||| Internally combines:
+||| - Thread-local mutation logs.
+||| - Immutable RRBVector snapshots.
+||| - Background rebuild publication.
+||| - Generation-based reclamation.
+||| - Adaptive rebuild batching.
+|||
+||| Visibility:
+||| - Writes become visible only after rebuild and publication.
+||| - Readers observe a consistent immutable snapshot.
+|||
+||| Notes:
+||| - Optimized for high write concurrency.
+||| - Read performance matches the underlying RRBVector snapshot.
+|||
 public export
 record LSMRRBVector s a where
   constructor MkLSMRRBVector

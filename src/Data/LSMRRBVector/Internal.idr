@@ -447,7 +447,8 @@ rotateBuffers ctx =
 ||| - Removes thread registrations whose post-rotation state contains no pending work.
 |||
 ||| Lifecycle:
-||| - Thread registrations are cleaned up automatically during rebuild.
+||| - Rotated thread contexts whose active buffer becomes empty are removed.
+||| - Because only active buffers contribute to emptiness, rebuild currently removes all rotated thread registrations.
 ||| - Explicit thread unregistration is unnecessary.
 |||
 ||| Properties:
@@ -546,6 +547,28 @@ sortEntries =
 --          Replay
 --------------------------------------------------------------------------------
 
+||| Applies a single deferred mutation to an RRBVector snapshot.
+|||
+||| Behavior:
+||| - Executes the logical operation represented by Operation.
+||| - Produces a new immutable vector.
+||| - Does not mutate the supplied vector.
+|||
+||| Variants:
+||| - Append  -> append value to end
+||| - Prepend -> prepend value to beginning
+||| - Insert  -> insert value at index
+||| - Delete  -> remove value at index
+||| - Update  -> replace value at index
+|||
+||| Properties:
+||| - Pure.
+||| - Deterministic.
+||| - Preserves RRBVector immutability.
+|||
+||| Notes:
+||| - Bounds behavior is inherited from the underlying RRBVector operation.
+|||
 export
 applyOperation :  Operation a
                -> RRBVector a
@@ -561,6 +584,26 @@ applyOperation (Delete i)   v =
 applyOperation (Update i x) v =
   update i x v
 
+||| Replays a sequence of buffered mutations onto an immutable snapshot.
+|||
+||| Behavior:
+||| - Traverses entries in order.
+||| - Applies each contained operation to the accumulating vector.
+||| - Produces a rebuilt snapshot reflecting all replayed mutations.
+|||
+||| Ordering:
+||| - Replay order is exactly the order of the supplied entry list.
+||| - Deterministic replay therefore depends on prior sorting.
+|||
+||| Properties:
+||| - Pure.
+||| - O(number of entries × operation cost).
+||| - Preserves snapshot immutability.
+|||
+||| Notes:
+||| - Typically executed after collectEntries and sortEntries.
+||| - Does not validate entry ordering.
+|||
 export
 replayEntries :  List (Entry a)
               -> RRBVector a
@@ -821,8 +864,8 @@ reclaimSnapshots combinedsnapshotstate =
 ||| - Reclaim retired snapshots.
 |||
 ||| Returns:
-||| - Published generation when work exists.
-||| - 0 when no publication occurred.
+||| - Newly published generation when entries were processed.
+||| - 0 only when no entries were available and publication did not occur.
 ||| - Whether any entries were processed.
 |||
 ||| Notes:
@@ -897,19 +940,20 @@ rebuildOnce buffers combinedsnapshotstate st = do
 ||| - Completion means no buffered work was visible during the final rotation.
 ||| - This is weaker than "all writes before return".
 ||| - Stronger linearizable flush semantics would require an explicit epoch or barrier mechanism.
+||| - Currently unused by rebuild request processing.
+||| - May serve as the implementation basis for future flush semantics.
 |||
 export covering
 flushUntilEmpty :  Ord (Entry a)
-                => Ref World (SortedMap Int (ThreadContext a))
-                -> Ref World (CombinedSnapshotState a)
+                => LSMRRBVector World a
                 -> RebuildServiceState
                 -> Async Poll [Errno] (RebuildServiceState, Generation)
-flushUntilEmpty buffers combinedsnapshotstate st =
+flushUntilEmpty lsmrrbvector st =
   let loop :  RebuildServiceState
            -> Generation
            -> Async Poll [Errno] (RebuildServiceState, Generation)
       loop st lastgen = do
-        (st', gen, hadentries) <- rebuildOnce buffers combinedsnapshotstate st
+        (st', gen, hadentries) <- rebuildOnce lsmrrbvector.buffers lsmrrbvector.combinedsnapshotstate st
         case hadentries of
           True  =>
             loop st' gen
@@ -928,10 +972,9 @@ flushUntilEmpty buffers combinedsnapshotstate st =
 ||| Two modes of operation exist:
 |||
 ||| Trigger:
-||| - Requests background progression toward publication.
-||| - May coalesce multiple requests.
-||| - Performs at most one rebuild cycle.
-||| - May or may not publish a new snapshot.
+||| - Performs exactly one rebuildOnce invocation.
+||| - May publish at most one snapshot.
+||| - Additional buffered work remains for future rebuild requests.
 |||
 ||| Flush:
 ||| - Repeatedly performs rebuild cycles until all buffered writes observed at invocation time are incorporated.
@@ -968,35 +1011,66 @@ handleRebuildRequest lsmrrbvector st Trigger = do
       st' = { rebuildphase := Sleeping
             } st
   pure ()
-handleRebuildRequest lsmrrbvector st Flush = do
-  (_, generation) <- flushUntilEmpty lsmrrbvector.buffers lsmrrbvector.combinedsnapshotstate st
-  liftIO (mod lsmrrbvector.rebuildscheduled (const False))
-  let st' : RebuildServiceState
-      st' = { rebuildphase := Sleeping
-            } st
-  pure ()
 
 --------------------------------------------------------------------------------
 --          Rebuild Service
 --------------------------------------------------------------------------------
 
+||| Constructs and launches rebuild-related background services.
+|||
+||| Behavior:
+||| - Creates a RebuildService endpoint.
+||| - Routes rebuild requests into handleRebuildRequest.
+||| - Starts all supplied rebuild-service actions concurrently.
+|||
+||| Concurrency:
+||| - Actions execute in parallel.
+||| - All actions share the same LSMRRBVector instance.
+||| - All actions share the same rebuild request endpoint.
+|||
+||| Properties:
+||| - Service composition utility.
+||| - Does not itself perform rebuild work.
+||| - Rebuild execution occurs only when actions issue requests.
+|||
+||| Notes:
+||| - Used to launch rebuild workers supporting background maintenance tasks.
+|||
 export covering
 rebuilderService :  Ord (Entry a)
                  => LSMRRBVector World a
                  -> RebuildServiceState
-                 -> List (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+                 -> List (LSMRRBVector World a -> RebuildService Poll -> RebuildServiceState -> Async Poll [Errno] ())
                  -> Async Poll [Errno] ()
 rebuilderService lsmrrbvector st actions = do
   rebuilderservice <-
     rebuilder
       (\req => handleRebuildRequest lsmrrbvector st req)
   ignore $
-    parTraverse (\action => action lsmrrbvector rebuilderservice) actions
+    parTraverse (\action => action lsmrrbvector rebuilderservice st) actions
 
 --------------------------------------------------------------------------------
 --          LSMRRBVector Service
 --------------------------------------------------------------------------------
 
+||| Launches user-supplied LSMRRBVector actions concurrently.
+|||
+||| Behavior:
+||| - Executes all supplied actions in parallel.
+||| - Provides each action access to the shared LSMRRBVector instance.
+|||
+||| Concurrency:
+||| - Actions may perform reads.
+||| - Execution order is not specified.
+||| - Actions run independently.
+|||
+||| Properties:
+||| - Service composition utility.
+||| - Does not perform vector operations itself.
+|||
+||| Notes:
+||| - Used to launch application readers.
+|||
 export covering
 lsmrrbvectorService :  LSMRRBVector World a
                     -> List (LSMRRBVector World a -> Async Poll [Errno] ())
@@ -1009,6 +1083,23 @@ lsmrrbvectorService lsmrrbvector actions =
 --          Rebuild And LSMRRBVector Service
 --------------------------------------------------------------------------------
 
+||| Runs rebuild infrastructure and reader workloads together.
+|||
+||| Behavior:
+||| - Executes the rebuilderService (writers) and  lsmrrbvectorSrvice (readers) concurrently.
+||| - Allows writers and readers to operate while rebuild work proceeds in the background.
+|||
+||| Concurrency:
+||| - Neither service blocks the other.
+||| - Rebuild publication may occur concurrently with reads and writes.
+|||
+||| Properties:
+||| - Top-level service composition utility.
+||| - Establishes the complete LSMRRBVector runtime.
+|||
+||| Notes:
+||| - Intended as the final composition point used by runEmptyWith.
+|||
 export covering
 rebuilderAndLSMRRBVectorService :  Async Poll [Errno] ()
                                 -> Async Poll [Errno] ()
