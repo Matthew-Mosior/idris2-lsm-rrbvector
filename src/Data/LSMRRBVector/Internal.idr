@@ -992,7 +992,6 @@ rebuilderService lsmrrbvector st actions = do
       (\req => handleRebuildRequest lsmrrbvector st req)
   ignore $
     parTraverse (\action => action lsmrrbvector rebuilderservice) actions
-  --action lsmrrbvector rebuilderservice
 
 --------------------------------------------------------------------------------
 --          LSMRRBVector Service
@@ -1000,13 +999,11 @@ rebuilderService lsmrrbvector st actions = do
 
 export covering
 lsmrrbvectorService :  LSMRRBVector World a
-       --             -> List (LSMRRBVector World a -> Async Poll [Errno] ())
-                    -> (LSMRRBVector World a -> Async Poll [Errno] ())
+                    -> List (LSMRRBVector World a -> Async Poll [Errno] ())
                     -> Async Poll [Errno] ()
-lsmrrbvectorService lsmrrbvector action =
---  ignore $
---    parTraverse (\action => action lsmrrbvector) actions
-  action lsmrrbvector
+lsmrrbvectorService lsmrrbvector actions =
+  ignore $
+    parTraverse (\action => action lsmrrbvector) actions
 
 --------------------------------------------------------------------------------
 --          Rebuild And LSMRRBVector Service
@@ -1018,4 +1015,8 @@ rebuilderAndLSMRRBVectorService :  Async Poll [Errno] ()
                                 -> Async Poll [Errno] ()
 rebuilderAndLSMRRBVectorService rebuilderservice lsmrrbvectorservice =
   ignore $
-    both rebuilderservice lsmrrbvectorservice
+    par [ -- writers
+         rebuilderservice
+        , -- readers
+          lsmrrbvectorservice
+        ]

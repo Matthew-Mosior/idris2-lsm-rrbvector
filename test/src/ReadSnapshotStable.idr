@@ -26,8 +26,9 @@ test_ReadSnapshotStable =
   runEmptyWith (MkLSMRRBVectorConfig 8)
                [ (\_, _ => pure ())
                ]
-               (\vec : LSMRRBVector World Int => do
+               [ (\vec : LSMRRBVector World Int => do
                    xs <- liftIO $ readSnapshotWithGeneration vec 1 (\(_, tree) => Data.RRBVector.toList tree)
                    when (xs /= []) $
                      assert_total $ idris_crash "test_ReadSnapshotStable: expected empty snapshot contents"
-               )
+                 )
+               ]

@@ -46,37 +46,32 @@ test_NWritersMReaders = do
                           Data.LSMRRBVector.append vec svc wid (cast n)
                           --liftIO (usleep 5000)
                           writer wid n
-                    writer 5 50
+                    writer 1 50
+                  )
+                , (\vec : LSMRRBVector World Int, svc => do
+                    -- writer function
+                    let writer :  Int
+                               -> Nat
+                               -> Async Poll [Errno] ()
+                        writer wid 0     =
+                          pure ()
+                        writer wid (S n) = do
+                          Data.LSMRRBVector.append vec svc wid (cast n)
+                          --liftIO (usleep 5000)
+                          writer wid n
+                    writer 2 50
                   )
                 ]
-                (\vec : LSMRRBVector World Int => do
-                    -- reader function
-                    let reader :  Int
-                               -> Nat
-                               -> IO ()
-                        reader rid 0     =
-                          pure ()
-                        reader rid (S n) = do
-                          v <- liftIO $ readSnapshotWithGeneration vec rid (\(_, tree) =>
-                                                                             Data.RRBVector.toList tree
-                                                                           )
-                          --putStrLn $ show v
-                          usleep 5000
-                          reader rid n
-                    -- spawn readers
-                    let spawnReaders : IO (List ThreadID)
-                        spawnReaders =
-                          for [0,1] $ \n => do
-                            fork $ do
-                              reader n 25
-                    usleep 50000
+                [ (\vec : LSMRRBVector World Int => do
+                    usleep 200000
                     --rtids <- liftIO spawnReaders
                     -- Wait for reader threads to finish
                     --for_ rtids $ \tid =>
                     --  liftIO $ threadWait tid
                     css <- readref vec.combinedsnapshotstate
                     buffers' <- readref vec.buffers
-                    when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 50) $ do
+                    when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 100) $ do
                       putStrLn $ show $ Data.RRBVector.toList css.currentsnapshot.tree
                       assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
                   )
+                ]
