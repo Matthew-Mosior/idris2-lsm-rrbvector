@@ -831,8 +831,6 @@ reclaimSnapshots combinedsnapshotstate =
 |||
 export covering
 rebuildOnce :  Ord (Entry a)
-            => Show (SortedMap Int (ThreadContext a))
-            => Show (List (Buffer a))
             => Ref World (SortedMap Int (ThreadContext a))
             -> Ref World (CombinedSnapshotState a)
             -> RebuildServiceState
@@ -841,13 +839,7 @@ rebuildOnce buffers combinedsnapshotstate st = do
   -- RotatingBuffers
   let st1        : RebuildServiceState
       st1        = { rebuildphase := RotatingBuffers } st
-  liftIO (putStrLn "before rotateAllBuffers.")
-  buffers' <- readref buffers
-  liftIO (putStrLn $ show buffers')
   extracted      <- liftIO (rotateAllBuffers buffers)
-  buffers'' <- readref buffers
-  liftIO (putStrLn $ show buffers'')
-  liftIO (putStrLn $ show extracted)
   -- CollectingEntries
   let st2        : RebuildServiceState
       st2        = { rebuildphase := CollectingEntries } st1
@@ -908,8 +900,6 @@ rebuildOnce buffers combinedsnapshotstate st = do
 |||
 export covering
 flushUntilEmpty :  Ord (Entry a)
-                => Show (SortedMap Int (ThreadContext a))
-                => Show (List (Buffer a))
                 => Ref World (SortedMap Int (ThreadContext a))
                 -> Ref World (CombinedSnapshotState a)
                 -> RebuildServiceState
@@ -967,16 +957,12 @@ flushUntilEmpty buffers combinedsnapshotstate st =
 |||
 export covering
 handleRebuildRequest :  Ord (Entry a)
-                     => Show (SortedMap Int (ThreadContext a))
-                     => Show (List (Buffer a))
                      => LSMRRBVector World a
                      -> RebuildServiceState
                      -> (req : RebuildRequest)
                      -> Async Poll [Errno] ()
 handleRebuildRequest lsmrrbvector st Trigger = do
-  liftIO (print "before rebuildOnce")
   (_, _, _) <- rebuildOnce lsmrrbvector.buffers lsmrrbvector.combinedsnapshotstate st
-  liftIO (print "after rebuildOnce")
   liftIO (mod lsmrrbvector.rebuildscheduled (const False))
   let st' : RebuildServiceState
       st' = { rebuildphase := Sleeping
@@ -996,17 +982,17 @@ handleRebuildRequest lsmrrbvector st Flush = do
 
 export covering
 rebuilderService :  Ord (Entry a)
-                 => Show (SortedMap Int (ThreadContext a))
-                 => Show (List (Buffer a))
                  => LSMRRBVector World a
                  -> RebuildServiceState
-                 -> (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+                 -> List (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
                  -> Async Poll [Errno] ()
-rebuilderService lsmrrbvector st action = do
+rebuilderService lsmrrbvector st actions = do
   rebuilderservice <-
     rebuilder
       (\req => handleRebuildRequest lsmrrbvector st req)
-  action lsmrrbvector rebuilderservice
+  ignore $
+    parTraverse (\action => action lsmrrbvector rebuilderservice) actions
+  --action lsmrrbvector rebuilderservice
 
 --------------------------------------------------------------------------------
 --          LSMRRBVector Service
@@ -1014,11 +1000,13 @@ rebuilderService lsmrrbvector st action = do
 
 export covering
 lsmrrbvectorService :  LSMRRBVector World a
-                    -> (LSMRRBVector World a -> IO ())
+       --             -> List (LSMRRBVector World a -> Async Poll [Errno] ())
+                    -> (LSMRRBVector World a -> Async Poll [Errno] ())
                     -> Async Poll [Errno] ()
 lsmrrbvectorService lsmrrbvector action =
-  liftIO $
-    action lsmrrbvector
+--  ignore $
+--    parTraverse (\action => action lsmrrbvector) actions
+  action lsmrrbvector
 
 --------------------------------------------------------------------------------
 --          Rebuild And LSMRRBVector Service

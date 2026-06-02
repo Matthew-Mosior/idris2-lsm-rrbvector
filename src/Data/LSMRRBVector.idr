@@ -277,18 +277,18 @@ defaultconfig = MkLSMRRBVectorConfig 64
 |||
 export covering
 runEmptyWith :  Ord (Entry a)
-             => Show (SortedMap Int (ThreadContext a))
-             => Show (List (Buffer a))
              => LSMRRBVectorConfig
-             -> (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
-             -> (LSMRRBVector World a -> IO ())
+             -> List (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+         --    -> (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+             -> (LSMRRBVector World a -> Async Poll [Errno] ())
+         --    -> List (LSMRRBVector World a -> Async Poll [Errno] ())
              -> IO ()
-runEmptyWith config rebuilderaction lsmrrbvectoraction = do
+runEmptyWith config rebuilderactions lsmrrbvectoraction = do
   buffers                 <- newref Data.SortedMap.empty
   combinedsnapshotstate   <- newref (MkCombinedSnapshotState (MkSnapshotState Z Empty) [] Data.SortedMap.empty 0 False config.initialbatchwindow)
   rebuildscheduled        <- newref False
   let lsmrrbvector        = MkLSMRRBVector buffers combinedsnapshotstate rebuildscheduled
-  let rebuilderservice    = rebuilderService lsmrrbvector initialRebuildServiceState rebuilderaction
+  let rebuilderservice    = rebuilderService lsmrrbvector initialRebuildServiceState rebuilderactions
   let lsmrrbvectorservice = lsmrrbvectorService lsmrrbvector lsmrrbvectoraction
   n                       <- asyncThreads
   app n [SIGINT] posixPoller $ handle handlers (rebuilderAndLSMRRBVectorService rebuilderservice lsmrrbvectorservice)
@@ -311,13 +311,13 @@ runEmptyWith config rebuilderaction lsmrrbvectoraction = do
 |||
 export covering
 runFastWritesEmpty :  Ord (Entry a)
-                   => Show (SortedMap Int (ThreadContext a))
-                   => Show (List (Buffer a))
-                   => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
-                   -> (LSMRRBVector World a -> IO ())
+                   => List (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+             --      => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+                   -> (LSMRRBVector World a -> Async Poll [Errno] ())
+             --      -> List (LSMRRBVector World a -> Async Poll [Errno] ())
                    -> IO ()
-runFastWritesEmpty rebuilderaction lsmrrbvectoraction =
-  runEmptyWith (MkLSMRRBVectorConfig 512) rebuilderaction lsmrrbvectoraction
+runFastWritesEmpty rebuilderactions lsmrrbvectoraction =
+  runEmptyWith (MkLSMRRBVectorConfig 512) rebuilderactions lsmrrbvectoraction
 
 ||| Runs an empty LSMRRBVector tuned for low publication latency.
 |||
@@ -334,22 +334,22 @@ runFastWritesEmpty rebuilderaction lsmrrbvectoraction =
 |||
 export covering
 runLowLatencyEmpty :  Ord (Entry a)
-                   => Show (SortedMap Int (ThreadContext a))
-                   => Show (List (Buffer a))
-                   => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
-                   -> (LSMRRBVector World a -> IO ())
+                   => List (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+               --    => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+                   -> (LSMRRBVector World a -> Async Poll [Errno] ())
+               --    -> List (LSMRRBVector World a -> Async Poll [Errno] ())
                    -> IO ()
-runLowLatencyEmpty rebuilderaction lsmrrbvectoraction =
-  runEmptyWith (MkLSMRRBVectorConfig 16) rebuilderaction lsmrrbvectoraction
+runLowLatencyEmpty rebuilderactions lsmrrbvectoraction =
+  runEmptyWith (MkLSMRRBVectorConfig 16) rebuilderactions lsmrrbvectoraction
 
 ||| Runs an empty log-structured merge vector. O(1)
 |||
 export covering
 runEmpty :  Ord (Entry a)
-         => Show (SortedMap Int (ThreadContext a))
-         => Show (List (Buffer a))
-         => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
-         -> (LSMRRBVector World a -> IO ())
+         => List (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+   --      => (LSMRRBVector World a -> RebuildService Poll -> Async Poll [Errno] ())
+         -> (LSMRRBVector World a -> Async Poll [Errno] ())
+   --      -> List (LSMRRBVector World a -> Async Poll [Errno] ())
          -> IO ()
-runEmpty rebuilderaction lsmrrbvectoraction = 
-  runEmptyWith defaultconfig rebuilderaction lsmrrbvectoraction
+runEmpty rebuilderactions lsmrrbvectoraction = 
+  runEmptyWith defaultconfig rebuilderactions lsmrrbvectoraction
