@@ -27,6 +27,7 @@ import IO.Async.Loop.Poller
 import IO.Async.Loop.Posix
 import IO.Async.Posix
 import IO.Async.Service
+import IO.Async.Util
 import Syntax.T1 as T1
 import System.Concurrency
 import System.Posix.Timer
@@ -1028,9 +1029,5 @@ rebuilderAndLSMRRBVectorService :  Async Poll [Errno] ()
                                 -> Async Poll [Errno] ()
                                 -> Async Poll [Errno] ()
 rebuilderAndLSMRRBVectorService rebuilderservice lsmrrbvectorservice =
-  race_
-    [ -- rebuilder (writer) service
-      rebuilderservice
-    , -- lsmrrbvector (reader) service
-      lsmrrbvectorservice
-    ]
+  ignore $
+    both rebuilderservice lsmrrbvectorservice

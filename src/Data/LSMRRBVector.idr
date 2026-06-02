@@ -296,7 +296,7 @@ runEmptyWith config rebuilderaction lsmrrbvectoraction = do
     handlers : All (Handler () Poll) [Errno]
     handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]
 
-||| Empty LSMRRBVector tuned for high sustained write throughput.
+||| Runs an empty LSMRRBVector tuned for high sustained write throughput.
 |||
 ||| Configuration:
 ||| - Initial adaptive batch window: 512
@@ -319,7 +319,7 @@ runFastWritesEmpty :  Ord (Entry a)
 runFastWritesEmpty rebuilderaction lsmrrbvectoraction =
   runEmptyWith (MkLSMRRBVectorConfig 512) rebuilderaction lsmrrbvectoraction
 
-||| Empty LSMRRBVector tuned for low publication latency.
+||| Runs an empty LSMRRBVector tuned for low publication latency.
 |||
 ||| Configuration:
 ||| - Initial adaptive batch window: 16
@@ -342,7 +342,7 @@ runLowLatencyEmpty :  Ord (Entry a)
 runLowLatencyEmpty rebuilderaction lsmrrbvectoraction =
   runEmptyWith (MkLSMRRBVectorConfig 16) rebuilderaction lsmrrbvectoraction
 
-||| The empty log-structured merge vector. O(1)
+||| Runs an empty log-structured merge vector. O(1)
 |||
 export covering
 runEmpty :  Ord (Entry a)

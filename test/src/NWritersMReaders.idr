@@ -43,7 +43,7 @@ test_NWritersMReaders = do
                         pure ()
                       writer wid (S n) = do
                         Data.LSMRRBVector.append vec svc wid (cast n)
-                        liftIO (usleep 5000)
+                        --liftIO (usleep 5000)
                         writer wid n
                   writer 5 50
                 )
@@ -67,7 +67,7 @@ test_NWritersMReaders = do
                               for [0,1] $ \n => do
                                 fork $ do
                                   reader n 25
-                        usleep 10000
+                        usleep 50000
                         rtids <- spawnReaders
                         -- Wait for reader threads to finish
                         for_ rtids $ \tid =>
@@ -77,5 +77,6 @@ test_NWritersMReaders = do
                         when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 50) $ do
                           putStrLn $ show buffers'
                           putStrLn $ show $ length $ Data.RRBVector.toList css.currentsnapshot.tree
+                          putStrLn $ show $ Data.RRBVector.toList css.currentsnapshot.tree
                           assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
                 )
