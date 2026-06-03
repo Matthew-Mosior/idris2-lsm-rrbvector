@@ -111,9 +111,10 @@ relaxedRadixIndex sizes i sh =
 ||| An internal tree representation.
 |||
 public export
-data Tree a = Balanced (Array (Tree a))
-            | Unbalanced (Array (Tree a)) (Array Nat)
-            | Leaf (Array a)
+data Tree a
+  = Balanced (Array (Tree a))
+  | Unbalanced (Array (Tree a)) (Array Nat)
+  | Leaf (Array a)
 
 --------------------------------------------------------------------------------
 --          Query (Tree)
@@ -414,9 +415,10 @@ log2 x =
 ||| It supports fast indexing, iteration, concatenation and splitting.
 |||
 public export
-data RRBVector a = Root Nat   -- size
-                        Shift -- shift (blockshift * height)
-                        (Tree a)
-                 | Empty
+data RRBVector a
+  = Root Nat   -- size
+         Shift -- shift (blockshift * height)
+         (Tree a)
+  | Empty
 
 %runElab derive "RRBVector" [Show]
