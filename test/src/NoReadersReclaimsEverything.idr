@@ -11,5 +11,15 @@ export
 test_NoReadersReclaimsEverything : IO ()
 test_NoReadersReclaimsEverything = do
   state : Ref World (CombinedSnapshotState Int) <-
-    newref (MkCombinedSnapshotState (MkSnapshotState 0 empty) [MkRetiredSnapshot 0 empty] empty 0 False 64)
+    newref
+      (MkCombinedSnapshotState
+        (MkSnapshotState 0 empty)
+        [MkRetiredSnapshot 0 empty]
+        empty
+        0
+        False
+        64)
   reclaimSnapshots state
+  css <- readref state
+  when (not (null css.retiredsnapshots)) $
+    putStrLn "test_NoReadersReclaimsEverything: retired snapshots were not reclaimed"

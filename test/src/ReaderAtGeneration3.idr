@@ -16,7 +16,19 @@ export
 test_ReaderAtGeneration3 : IO ()
 test_ReaderAtGeneration3 = do
   state : Ref World (CombinedSnapshotState Int) <-
-    newref (MkCombinedSnapshotState (MkSnapshotState 3 empty) [] empty 0 False 64)
-  -- reader registers current generation (3)
+    newref
+      (MkCombinedSnapshotState
+        (MkSnapshotState 3 empty)
+        []
+        empty
+        0
+        False
+        64)
   _ <- enterGeneration state 1
-  pure ()
+  css <- readref state
+  case lookup 1 css.readerstate of
+    Nothing =>
+      putStrLn "test_ReaderAtGeneration3: reader registration missing"
+    Just rs =>
+      when (rs.generation /= 3) $
+        putStrLn "test_ReaderAtGeneration3: incorrect generation recorded"

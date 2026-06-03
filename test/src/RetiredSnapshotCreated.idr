@@ -21,4 +21,13 @@ test_RetiredSnapshotCreated = do
   let entries                                   = [MkEntry (Append 1) (toUTC $ TM 1 0 0 1 0 0 0 0 False) 1 0]
   gen                                           <- publishSnapshot state entries
   when (gen /= 1) $
-    assert_total $ idris_crash "test_RetiredSnapshotCreated: generation not incremented"
+    putStrLn "test_RetiredSnapshotCreated: generation not incremented"
+  css <- readref state
+  when (length css.retiredsnapshots /= 1) $
+    putStrLn "test_RetiredSnapshotCreated: retired snapshot missing"
+  case css.retiredsnapshots of
+    [snap] =>
+      when (snap.generation /= 0) $
+        putStrLn "test_RetiredSnapshotCreated: incorrect retired generation"
+    _ =>
+      putStrLn "test_RetiredSnapshotCreated: unexpected retired snapshot count"

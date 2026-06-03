@@ -1016,7 +1016,7 @@ handleRebuildRequest lsmrrbvector st Trigger = do
 --          Rebuild Service
 --------------------------------------------------------------------------------
 
-||| Constructs and launches rebuild-related background services.
+||| Constructs and launches user-supplied rebuild (writer) actions concurrently.
 |||
 ||| Behavior:
 ||| - Creates a RebuildService endpoint.
@@ -1053,7 +1053,7 @@ rebuilderService lsmrrbvector st actions = do
 --          LSMRRBVector Service
 --------------------------------------------------------------------------------
 
-||| Launches user-supplied LSMRRBVector actions concurrently.
+||| Constructs and launches user-supplied reader actions concurrently.
 |||
 ||| Behavior:
 ||| - Executes all supplied actions in parallel.
@@ -1086,7 +1086,7 @@ lsmrrbvectorService lsmrrbvector actions =
 ||| Runs rebuild infrastructure and reader workloads together.
 |||
 ||| Behavior:
-||| - Executes the rebuilderService (writers) and  lsmrrbvectorSrvice (readers) concurrently.
+||| - Executes the rebuilderService (writers) and lsmrrbvectorService (readers) concurrently.
 ||| - Allows writers and readers to operate while rebuild work proceeds in the background.
 |||
 ||| Concurrency:
@@ -1094,7 +1094,7 @@ lsmrrbvectorService lsmrrbvector actions =
 ||| - Rebuild publication may occur concurrently with reads and writes.
 |||
 ||| Properties:
-||| - Top-level service composition utility.
+||| - Top-level composition utility.
 ||| - Establishes the complete LSMRRBVector runtime.
 |||
 ||| Notes:
