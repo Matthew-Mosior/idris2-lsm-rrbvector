@@ -168,7 +168,7 @@ Root
 └─ huge subtree
 ```
 
-## LSMRRBVector: High-level architecture
+## LSMRRBVector
 
 ![high-level-architecture](resources/high-level-architecture.png)
 
