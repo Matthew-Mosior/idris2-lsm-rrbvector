@@ -449,7 +449,7 @@ Example:
 | 2      | 18          |
 | 3      | 20          |
 
-Retired snapshots (generations): `10  - 16`
+Retired snapshots (generations): `10 - 16`
 
 Reader `1` is reading the oldest generation, `15`.
 
