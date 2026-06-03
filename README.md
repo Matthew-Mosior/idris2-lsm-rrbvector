@@ -7,6 +7,8 @@ This library provides a log-structured, snapshot-based concurrent vector that co
 
 ## What's a relaxed radix balanced vector?
 
+![rrbvector-architecture](resources/rrbvector-architecture.png)
+
 Before diving into the over-arching log-structured merge relaxed radix balanced vector (`LSMRRBVector`), it's important to understand the underlying **data model** because every complexity claim comes directly from how the tree is organized.
 
 | Operation | Complexity |
@@ -165,10 +167,6 @@ Root
 ├─ tiny subtree
 └─ huge subtree
 ```
-
-### Model
-
-![rrbvector-architecture](resources/rrbvector-architecture.png)
 
 ## LSMRRBVector: High-level architecture
 
