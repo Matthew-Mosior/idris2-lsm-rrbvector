@@ -26,6 +26,9 @@ jobs:
       fail-fast: false
     container: ghcr.io/stefan-hoeck/idris2-pack:latest
     steps:
+      - name: Export IDRIS2_ASYNC_THREADS Environment Variable
+        run: |
+          echo "IDRIS2_ASYNC_THREADS=4" >> $GITHUB_ENV
       - name: Checkout
         uses: actions/checkout@v2
       - name: Install lsm-rrbvctor
