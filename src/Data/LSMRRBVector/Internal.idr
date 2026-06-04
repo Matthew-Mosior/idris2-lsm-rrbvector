@@ -774,7 +774,6 @@ publishSnapshot combinedsnapshotstateref entries =
 |||
 ||| Returns:
 ||| - Nothing: No readers exist, or no retired snapshots can be reclaimed.
-|||
 ||| - Just g: Every retired snapshot with generation <= g may safely be reclaimed.
 |||
 ||| Safety rules:
@@ -786,7 +785,7 @@ publishSnapshot combinedsnapshotstateref entries =
 |||
 ||| Retired              <-> [1,2,3,4,5]
 ||| Active readers       <-> [4,7]
-||| oldest active reader <-> 4
+||| Oldest active reader <-> 4
 ||| Safe reclamation     <-> [1,2,3]
 ||| Result               <-> Just 3
 |||
