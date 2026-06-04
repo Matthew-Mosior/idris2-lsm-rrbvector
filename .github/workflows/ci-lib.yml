@@ -19,7 +19,7 @@ jobs:
 
   build:
     name: Build the lib with Idris2 HEAD
-    runs-on: ubuntu-latest-4core
+    runs-on: ubuntu-latest
     env:
       PACK_DIR: /root/.pack
     strategy:
