@@ -453,6 +453,10 @@ Reader `1` is reading the oldest generation, `15`.
 
 Thus, generations `10 - 14` can be safely reclaimed.
 
-### Reader architecture
+### Readers
+
+Readers never block the rebuilder service, they read the from one of the non-yet reclaimed immutable RRB snapshots instead.
+
+#### Reader architecture
 
 ![reader-architecture](resources/reader-architecture.png)
