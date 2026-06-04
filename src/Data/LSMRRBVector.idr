@@ -254,7 +254,7 @@ null lsmrrbvector tid =
 --          Default Config
 --------------------------------------------------------------------------------
 
-||| Default LSMRRBVector configuration.
+||| Default log-structured merge vector configuration.
 |||
 ||| Current defaults favor balanced throughput and latency.
 |||
@@ -294,7 +294,7 @@ runEmptyWith config rebuilderactions lsmrrbvectoractions = do
     handlers : All (Handler () Poll) [Errno]
     handlers = [\x => stderrLn "Error: \{errorText x} (\{errorName x})"]
 
-||| Runs an empty LSMRRBVector tuned for high sustained write throughput.
+||| Runs an empty log-structured merge vector tuned for high sustained write throughput.
 |||
 ||| Configuration:
 ||| - Initial adaptive batch window: 512
@@ -315,7 +315,7 @@ runFastWritesEmpty :  Ord (Entry a)
 runFastWritesEmpty rebuilderactions lsmrrbvectoractions =
   runEmptyWith (MkLSMRRBVectorConfig 512) rebuilderactions lsmrrbvectoractions
 
-||| Runs an empty LSMRRBVector tuned for low publication latency.
+||| Runs an empty log-structured merge vector tuned for low publication latency.
 |||
 ||| Configuration:
 ||| - Initial adaptive batch window: 16
