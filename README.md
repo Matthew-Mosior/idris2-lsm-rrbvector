@@ -279,7 +279,7 @@ Given a light write load of window = 128 and pressure = 10, window becomes 64, t
 
 ###### Summary
 
-The adaptive growth/shrink mechanisms allows the vector to automatically balance, latency, rebuild cost, and throughput, and system doesn't require manual tuning.
+The adaptive growth/shrink mechanisms allows the vector to automatically balance latency, rebuild cost, and throughput, and system doesn't require manual tuning.
 
 ### Snapshot publication/Rebuild pipeline
 
