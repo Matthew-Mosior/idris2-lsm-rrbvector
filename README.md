@@ -455,7 +455,7 @@ Thus, generations `10 - 14` can be safely reclaimed.
 
 ### Readers
 
-Readers never block the rebuilder service, they read the from one of the non-yet reclaimed immutable RRB snapshots instead.
+Readers never block the rebuilder service, they read the from one of the not-yet reclaimed immutable RRB snapshots instead.
 
 #### Reader architecture
 
