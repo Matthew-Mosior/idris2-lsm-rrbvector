@@ -3,7 +3,8 @@ package lsm-rrbvector-test
 version    = 0.1.0
 authors    = "Matthew-Mosior"
 sourcedir  = "src"
-depends    = lsm-rrbvector
+depends    = hedgehog
+           , lsm-rrbvector
            , posix
 main       = Main
 executable = "lsm-rrbvector-test"

@@ -3,6 +3,7 @@ module Main
 import DeterministicOrdering
 import GenerationMonotonic
 import HeavyAppendLoad
+import Hedgehog
 import NoReadersReclaimsEverything
 import NWritersMReaders
 import SortThenReplayDeterministic
@@ -13,9 +14,12 @@ import RegisterThreadReuse
 import ReplayProducesExpectedVector
 import RetiredSnapshotCreated
 import RotateTransfersOwnership
+import RRBVector
 
 main : IO ()
 main = do
+  _  <- test [ props
+             ]
   () <- test_RegisterThreadReuse
   () <- test_RotateTransfersOwnership
   () <- test_DeterministicOrdering
