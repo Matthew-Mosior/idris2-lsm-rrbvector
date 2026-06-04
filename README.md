@@ -263,83 +263,23 @@ This is conceptually similar to:
 
 ![write-pressure-and-adaptive-batching](resources/write-pressure-and-adaptive-batching.png)
 
-Every write increments global write pressure.
-
-State lives inside:
-
-```
-CombinedSnapshotState
-```
-
-Fields:
-
-```
-writepressure
-rebuildpending
-batchwindow
-```
+State lives inside `CombinedSnapshotState`, that has the fields `writepressure`, `rebuildpending`, `batchwindow`, and every write increments global write pressure.
 
 Example:
 
-```
-batchwindow = 64
-```
-
-After:
-
-```
-64 writes
-```
-
-Thus the system marks:
-
-```
-rebuildpending = True
-```
-
-and schedules rebuild work.
+Given batchwindow = 64, after 64 writes, the system would mark rebuildpending = True, and schedules rebuild work.
 
 ##### Adaptive growth
 
-Heavy write load:
-
-```
-window = 64
-pressure = 200
-```
-
-Result:
-
-```
-window -> 128
-```
-
-The system rebuilds less frequently.
+Given a heavy Heavy write load of window = 64 and pressure = 200, window becomes 128, thus the system rebuilds less frequently.
 
 ##### Adaptive shrink
 
-Light write load:
+Given a light write load of window = 128 and pressure = 10, window becomes 64, thus the system rebuilds more aggressively.
 
-```
-window = 128
-pressure = 10
-```
+###### Summary
 
-Result:
-
-```
-window -> 64
-```
-
-The system rebuilds more aggressively.
-
-This allows the vector to automatically balance:
-
--   Latency
--   Rebuild cost
--   Throughput
-
-Then the system doesn't require manual tuning.
+The adaptive growth/shrink mechanisms allows the vector to automatically balance, latency, rebuild cost, and throughput, and system doesn't require manual tuning.
 
 ### Snapshot publication/Rebuild pipeline
 
