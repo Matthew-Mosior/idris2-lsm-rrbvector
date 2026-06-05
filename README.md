@@ -331,7 +331,7 @@ After rotation the rebuilder owns many buffers, and collection flattens them int
 The collected entries are sorted by:
 
 1. timestamp
-2. thread id
+2. thread ID
 3. sequence
 
 This produces a globally stable replay order.
