@@ -1,6 +1,7 @@
 # A Log-Structured Merge Relaxed Radix Balanced Vector
 
-This library provides a log-structured, snapshot-based concurrent vector that combines thread-local write buffering, background log replay, and immutable [relaxed radix balanced vector](https://infoscience.epfl.ch/server/api/core/bitstreams/7c8b929f-1f68-4948-8ea8-e364e4899b2a/content) (RRBVector) snapshots to provide high-throughput writes and lock-free consistent reads. It uses generation-tracked snapshot publication and safe reclamation of retired versions, allowing readers and writers to operate concurrently without contending on the underlying vector structure.
+This library provides a log-structured, snapshot-based concurrent vector that combines thread-local write buffering, background log replay, and immutable [relaxed radix balanced vector](https://infoscience.epfl.ch/server/api/core/bitstreams/7c8b929f-1f68-4948-8ea8-e364e4899b2a/content) (RRBVector) snapshots to provide high-throughput writes and lock-free consistent reads.
+It uses generation-tracked snapshot publication and safe reclamation of retired versions, allowing readers and writers to operate concurrently without contending on the underlying vector structure.
 
 > [!NOTE]
 > The internals of this library heavily utilize the [idris2-ref1](https://github.com/stefan-hoeck/idris2-ref1), [idris2-elin](https://github.com/stefan-hoeck/idris2-elin), and [idris2-async](github.com/stefan-hoeck/idris2-async) libraries, so you may want to familiarize yourself with them first.
