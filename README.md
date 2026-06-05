@@ -33,9 +33,10 @@ People use RRBVectors because they combine many of the performance characteristi
 RRB = Relaxed Radix Balanced
 
 Which means:
--   Radix → Constant branching factor.
--   Balanced → Tree height remains logarithmic.
--   Relaxed → Unlike a strict radix trie, subtrees are allowed to have different sizes.
+
+- Radix → Constant branching factor.
+- Balanced → Tree height remains logarithmic.
+- Relaxed → Unlike a strict radix trie, subtrees are allowed to have different sizes.
 
 That relaxation is what enables efficient concatenation.
 
@@ -61,9 +62,10 @@ Shift indicates tree depth.
 ### Tree Nodes
 
 There are three tree variants:
- - `Balanced`
- - `Unbalanced`
- - `Leaf`
+
+- `Balanced`
+- `Unbalanced`
+- `Leaf`
 
 #### Balanced nodes
 
@@ -181,10 +183,11 @@ Root
 The `LSMRRBVector` is a **log-structured, immutable, concurrent vector** built on top of an underlying `RRBVector`. Rather than applying mutations directly to the vector, writers append mutation records into per-thread logs. A background rebuilder process periodically merges those logs into a new immutable RRB snapshot and atomically publishes it for readers.
 
 This design separates the system into four major subsystems:
-1.  Writers
-2.  Thread-local mutation buffers
-3.  Snapshot publication/Rebuild pipeline
-4.  Readers and reclamation
+
+1. Writers
+2. Thread-local mutation buffers
+3. Snapshot publication/Rebuild pipeline
+4. Readers and reclamation
 
 ### Internal state layout
 
@@ -197,17 +200,19 @@ This design separates the system into four major subsystems:
 The write path is intentionally designed to avoid touching the published snapshot.
 
 When a thread performs one of the following possible operations:
--   `append`
--   `prepend`
--   `insert`
--   `delete`
--   `update`
+
+- `append`
+- `prepend`
+- `insert`
+- `delete`
+- `update`
 
 The operation is converted into an `Operation` value and wrapped in an `Entry`.
 
 The write never modifies the current `RRBVector`.  Instead, it is appended into a thread-owned mutation log.
 
 This provides several important properties:
+
 - O(1) writes
   - Appending into a `SnocList` buffer is amortized O(1).
 - No snapshot contention
@@ -261,9 +266,9 @@ The rebuild process later merges all buffers together.
 
 This is conceptually similar to:
 
--   LSM-tree memtables.
--   Per-core logging systems.
--   Lock-free batching queues.
+- LSM-tree memtables.
+- Per-core logging systems.
+- Lock-free batching queues.
 
 #### Write pressure and adaptive batching
 
@@ -324,9 +329,10 @@ After rotation the rebuilder owns many buffers, and collection flattens them int
 ![deterministic-sorting](resources/deterministic-sorting.png)
 
 The collected entries are sorted by:
-1.  timestamp
-2.  thread id
-3.  sequence
+
+1. timestamp
+2. thread id
+3. sequence
 
 This produces a globally stable replay order.
 
