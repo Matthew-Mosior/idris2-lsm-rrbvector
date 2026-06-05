@@ -68,6 +68,7 @@ test_NWritersMReaders = do
                     pure ()
                   )
                 ]
+                -- reader function(s)
                 [ (\vec : LSMRRBVector World Int => do
                     liftIO $ usleep 10000000
                     css <- readref vec.combinedsnapshotstate
