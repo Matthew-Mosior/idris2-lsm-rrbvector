@@ -11,7 +11,7 @@ This library provides a log-structured, snapshot-based concurrent vector that co
 
 Before diving into the over-arching log-structured merge relaxed radix balanced vector (`LSMRRBVector`), it's important to understand the underlying **data model** because every complexity claim comes directly from how the tree is organized.
 
-### Summary
+### RRBVector - Summary
 
 A Relaxed Radix Balanced Vector (RRBVector) is a persistent, immutable vector data structure that stores elements in a shallow wide tree (typically branching by 16 or 32) to provide efficient random access, updates, appends, concatenation, and slicing while structurally sharing most of its memory between versions.
 
@@ -288,7 +288,7 @@ Given a heavy Heavy write load of window = 64 and pressure = 200, window becomes
 
 Given a light write load of window = 128 and pressure = 10, window becomes 64, thus the system rebuilds more aggressively.
 
-###### Summary
+###### Write pressure and adaptive batching - Summary
 
 The adaptive growth/shrink mechanisms allows the vector to automatically balance latency, rebuild cost, and throughput, and system doesn't require manual tuning.
 
