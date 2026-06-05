@@ -29,6 +29,9 @@ People use RRBVectors because they combine many of the performance characteristi
 | take      | O(log₁₆ n) |
 | drop      | O(log₁₆ n) |
 
+> [!NOTE]
+> This RRBVector implementation uses a branching factor of 16.
+
 ### Breaking down relaxed radix balanced
 
 RRB = Relaxed Radix Balanced
