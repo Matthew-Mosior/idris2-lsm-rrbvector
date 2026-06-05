@@ -114,7 +114,7 @@ Size table:
 
 Meaning:
 
-```
+```text
 0-7    -> child A
 8-19   -> child B
 20-30  -> child C
@@ -124,7 +124,7 @@ Meaning:
 
 Without them:
 
-```
+```text
 A = 1,000,000 elements
 B = 5 elements
 ```
@@ -133,7 +133,7 @@ Concatenation would require rebuilding the entire tree.
 
 RRB instead creates:
 
-```
+```text
 Root
 ├─ A
 └─ B
@@ -338,7 +338,7 @@ This produces a globally stable replay order.
 
 Example:
 
-```
+```text
 T1 Seq0
 T2 Seq0
 T1 Seq1
@@ -393,7 +393,7 @@ Reclamation uses the oldest active reader generation.
 
 Example:
 
-| Reader | Generation |
+| Reader | Generation  |
 | ------ | ----------- |
 | 1      | 15          |
 | 2      | 18          |
