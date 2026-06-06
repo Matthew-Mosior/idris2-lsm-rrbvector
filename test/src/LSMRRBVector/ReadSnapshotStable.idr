@@ -1,4 +1,4 @@
-module ReadSnapshotStable
+module LSMRRBVector.ReadSnapshotStable
 
 import Data.Linear.Ref1
 import Data.LSMRRBVector
@@ -29,8 +29,8 @@ test_ReadSnapshotStable =
                [ (\vec : LSMRRBVector World Int => do
                    (gen, xs) <- liftIO $ readSnapshotWithGeneration vec 1 (\(g, tree) => (g, Data.RRBVector.toList tree))
                    when (xs /= []) $
-                     putStrLn "test_ReadSnapshotStable: expected empty snapshot contents"
+                     assert_total $ idris_crash "test_ReadSnapshotStable: expected empty snapshot contents"
                    when (gen /= 0) $
-                     putStrLn "test_ReadSnapshotStable: unexpected generation"
+                     assert_total $ idris_crash "test_ReadSnapshotStable: unexpected generation"
                  )
                ]

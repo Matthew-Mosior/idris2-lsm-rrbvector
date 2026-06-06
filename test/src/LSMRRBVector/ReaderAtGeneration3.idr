@@ -1,4 +1,4 @@
-module ReaderAtGeneration3
+module LSMRRBVector.ReaderAtGeneration3
 
 import Data.Linear.Ref1
 import Data.LSMRRBVector
@@ -28,7 +28,7 @@ test_ReaderAtGeneration3 = do
   css <- readref state
   case lookup 1 css.readerstate of
     Nothing =>
-      putStrLn "test_ReaderAtGeneration3: reader registration missing"
+      assert_total $ idris_crash "test_ReaderAtGeneration3: reader registration missing"
     Just rs =>
       when (rs.generation /= 3) $
-        putStrLn "test_ReaderAtGeneration3: incorrect generation recorded"
+        assert_total $ idris_crash "test_ReaderAtGeneration3: incorrect generation recorded"

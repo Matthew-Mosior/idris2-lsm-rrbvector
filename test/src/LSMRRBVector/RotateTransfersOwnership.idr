@@ -1,4 +1,4 @@
-module RotateTransfersOwnership
+module LSMRRBVector.RotateTransfersOwnership
 
 import Data.Linear.Ref1
 import Data.LSMRRBVector
@@ -38,10 +38,10 @@ test_RotateTransfersOwnership = do
     Nothing   =>
       -- extracted buffers must include one buffer
       when (null extracted) $
-        putStrLn "test_RotateTransfersOwnership: no buffers extracted"
+        assert_total $ idris_crash "test_RotateTransfersOwnership: no buffers extracted"
     Just ctx' => do
       when (not (bufferEmpty ctx'.buffers.active)) $
-        putStrLn "test_RotateTransfersOwnership: buffer not cleared after rotation"
+        assert_total $ idris_crash "test_RotateTransfersOwnership: buffer not cleared after rotation"
       -- extracted buffers must include one buffer
       when (null extracted) $
-        putStrLn "test_RotateTransfersOwnership: no buffers extracted"
+        assert_total $ idris_crash "test_RotateTransfersOwnership: no buffers extracted"

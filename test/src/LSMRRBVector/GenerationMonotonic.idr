@@ -1,4 +1,4 @@
-module GenerationMonotonic
+module LSMRRBVector.GenerationMonotonic
 
 import Data.Linear.Ref1
 import Data.LSMRRBVector
@@ -19,4 +19,4 @@ test_GenerationMonotonic = do
   g2 <- publishSnapshot state []
   g3 <- publishSnapshot state []
   when (not (g1 < g2 && g2 < g3)) $
-    putStrLn "test_GenerationMonotonic: generation not monotonic"
+    assert_total $ idris_crash "test_GenerationMonotonic: generation not monotonic"

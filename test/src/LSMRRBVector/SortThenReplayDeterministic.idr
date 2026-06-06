@@ -1,4 +1,4 @@
-module SortThenReplayDeterministic
+module LSMRRBVector.SortThenReplayDeterministic
 
 import Data.LSMRRBVector
 import Data.RRBVector
@@ -63,7 +63,7 @@ test_SortThenReplayDeterministic = do
   let sorted =
         sortEntries unsorted
   when (sorted /= [e1, e2, e3]) $
-    putStrLn "test_SortThenReplayDeterministic: sortEntries produced incorrect ordering"
+    assert_total $ idris_crash "test_SortThenReplayDeterministic: sortEntries produced incorrect ordering"
   let result =
         replayEntries
           sorted
@@ -71,6 +71,6 @@ test_SortThenReplayDeterministic = do
   let expected =
         Empty |> 1 |> 2 |> 3
   when (result /= expected) $
-    putStrLn "test_SortThenReplayDeterministic: replay produced incorrect vector"
+    assert_total $ idris_crash "test_SortThenReplayDeterministic: replay produced incorrect vector"
   when (Data.RRBVector.toList result /= [1,2,3]) $
-    putStrLn "test_SortThenReplayDeterministic: final contents mismatch"
+    assert_total $ idris_crash "test_SortThenReplayDeterministic: final contents mismatch"

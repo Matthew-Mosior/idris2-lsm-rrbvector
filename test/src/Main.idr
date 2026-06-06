@@ -1,19 +1,19 @@
 module Main
 
-import DeterministicOrdering
-import GenerationMonotonic
-import HeavyAppendLoad
 import Hedgehog
-import NoReadersReclaimsEverything
-import NWritersMReaders
-import SortThenReplayDeterministic
-import ReaderAtGeneration3
-import ReaderDoesNotPinAncientGenerations
-import ReadSnapshotStable
-import RegisterThreadReuse
-import ReplayProducesExpectedVector
-import RetiredSnapshotCreated
-import RotateTransfersOwnership
+import LSMRRBVector.DeterministicOrdering
+import LSMRRBVector.GenerationMonotonic
+import LSMRRBVector.HeavyAppendLoad
+import LSMRRBVector.NoReadersReclaimsEverything
+import LSMRRBVector.NWritersMReaders
+import LSMRRBVector.SortThenReplayDeterministic
+import LSMRRBVector.ReaderAtGeneration3
+import LSMRRBVector.ReaderDoesNotPinAncientGenerations
+import LSMRRBVector.ReadSnapshotStable
+import LSMRRBVector.RegisterThreadReuse
+import LSMRRBVector.ReplayProducesExpectedVector
+import LSMRRBVector.RetiredSnapshotCreated
+import LSMRRBVector.RotateTransfersOwnership
 import RRBVector
 
 main : IO ()

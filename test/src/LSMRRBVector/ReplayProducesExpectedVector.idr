@@ -1,4 +1,4 @@
-module ReplayProducesExpectedVector
+module LSMRRBVector.ReplayProducesExpectedVector
 
 import Data.LSMRRBVector
 import Data.RRBVector
@@ -24,4 +24,4 @@ test_ReplayProducesExpectedVector = do
   let result   = replayEntries [e1, e2, e3] v0
   let expected = 0 <| (Empty |> 1 |> 2)
   when (result /= expected) $
-    putStrLn "test_ReplayProducesExpectedVector: replay mismatch"
+    assert_total $ idris_crash "test_ReplayProducesExpectedVector: replay mismatch"

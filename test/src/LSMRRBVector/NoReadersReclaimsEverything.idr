@@ -1,4 +1,4 @@
-module NoReadersReclaimsEverything
+module LSMRRBVector.NoReadersReclaimsEverything
 
 import Data.Linear.Ref1
 import Data.LSMRRBVector
@@ -22,4 +22,4 @@ test_NoReadersReclaimsEverything = do
   reclaimSnapshots state
   css <- readref state
   when (not (null css.retiredsnapshots)) $
-    putStrLn "test_NoReadersReclaimsEverything: retired snapshots were not reclaimed"
+    assert_total $ idris_crash "test_NoReadersReclaimsEverything: retired snapshots were not reclaimed"

@@ -1,4 +1,4 @@
-module DeterministicOrdering
+module LSMRRBVector.DeterministicOrdering
 
 import Data.Linear.Ref1
 import Data.List
@@ -21,4 +21,4 @@ test_DeterministicOrdering = do
   let sorted1 = sortEntries input
   let sorted2 = sortEntries input
   when (sorted1 /= [e1, e2, e3]) $
-    putStrLn "test_DeterministicOrdering: incorrect ordering"
+    assert_total $ idris_crash "test_DeterministicOrdering: incorrect ordering"

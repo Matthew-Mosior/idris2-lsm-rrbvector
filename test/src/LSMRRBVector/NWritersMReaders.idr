@@ -1,4 +1,4 @@
-module NWritersMReaders
+module LSMRRBVector.NWritersMReaders
 
 import Data.Linear.Ref1
 import Data.LSMRRBVector
@@ -74,20 +74,20 @@ test_NWritersMReaders = do
                     css <- readref vec.combinedsnapshotstate
                     buffers' <- readref vec.buffers
                     when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 100) $ do
-                      liftIO $ putStrLn "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
+                      assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
                   )
                 , (\vec : LSMRRBVector World Int => do
                     liftIO $ usleep 10000000
                     css <- readref vec.combinedsnapshotstate
                     buffers' <- readref vec.buffers
                     when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 100) $ do
-                      liftIO $ putStrLn "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
+                      assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
                   )
                 , (\vec : LSMRRBVector World Int => do
                     liftIO $ usleep 10000000
                     css <- readref vec.combinedsnapshotstate
                     buffers' <- readref vec.buffers
                     when ((length $ Data.RRBVector.toList css.currentsnapshot.tree) /= 100) $ do
-                      liftIO $ putStrLn "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
+                      assert_total $ idris_crash "test_NWritersMReaders: missing writes to final rrbvector since it's size is not equal to total writes"
                   )
                 ]

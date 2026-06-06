@@ -1,4 +1,4 @@
-module ReaderDoesNotPinAncientGenerations
+module LSMRRBVector.ReaderDoesNotPinAncientGenerations
 
 import Data.Linear.Ref1
 import Data.LSMRRBVector
@@ -25,4 +25,4 @@ test_ReaderDoesNotPinAncientGenerations = do
   reclaimSnapshots state
   css <- readref state
   when (not (null css.retiredsnapshots)) $
-    putStrLn "test_ReaderDoesNotPinAncientGenerations: retired snapshots not reclaimed"
+    assert_total $ idris_crash "test_ReaderDoesNotPinAncientGenerations: retired snapshots not reclaimed"

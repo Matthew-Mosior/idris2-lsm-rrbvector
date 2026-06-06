@@ -9,9 +9,9 @@ import Data.Array.Core
 import Data.Array.Index
 import Data.Array.Indexed
 import Data.Bits
-import Data.Maybe
 import Data.List
 import Data.List1
+import Data.Maybe
 import Data.SnocList
 import Data.Vect
 import Data.Zippable
@@ -1034,7 +1034,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
               newnode' <- readSTRef newnode
               modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
                                                                 (snocConcat newnode'))
-                                    )
+                                     )
               writeSTRef newnode Lin
               writeSTRef nodecounter 0
               modifySTRef subtreecounter (\y => y + 1
@@ -1053,7 +1053,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
         newnode' <- readSTRef newnode
         modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
                                                           (snocConcat newnode'))
-                                           )
+                               )
         newsubtree' <- readSTRef newsubtree
         modifySTRef newroot (\y => y :< (computeSizes sh (fromList $ the (List (Tree a)) (cast newsubtree')))
                             )
@@ -1080,7 +1080,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
               newnode' <- readSTRef newnode
               modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
                                                                 (snocConcat newnode'))
-                                    )
+                                     )
               writeSTRef newnode Lin
               writeSTRef nodecounter 0
               modifySTRef subtreecounter (\y => y + 1
@@ -1099,7 +1099,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
         newnode' <- readSTRef newnode
         modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
                                                           (snocConcat newnode'))
-                                           )
+                               )
         newsubtree' <- readSTRef newsubtree
         modifySTRef newroot (\y => y :< (computeSizes sh (fromList $ the (List (Tree a)) (cast newsubtree')))
                             )
