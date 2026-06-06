@@ -1,4 +1,4 @@
-||| Log-Structured Merge RRB Vectors (LSMRRBVector)
+||| Log-Structured Merge RRB Vector (LSMRRBVector)
 module Data.LSMRRBVector
 
 import public Data.LSMRRBVector.Internal
