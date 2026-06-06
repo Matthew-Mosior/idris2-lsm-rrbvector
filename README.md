@@ -170,7 +170,7 @@ Take `update 500 x` for example, only nodes along one path are copied.
 
 ### Why Concatenation Works
 
-The crucial idea is that a strict radix tree demands every subtree perfectly aligned.  RRB relaxes this, this after `left >< right` ,the result may contain:
+The crucial idea is that a strict radix tree demands every subtree perfectly aligned.  RRB relaxes this, this after `left >< right`, the result may contain:
 
 ```text
 Root
