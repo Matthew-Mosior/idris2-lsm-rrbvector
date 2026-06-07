@@ -16,7 +16,7 @@ Before diving into the over-arching log-structured merge relaxed radix balanced 
 
 A Relaxed Radix Balanced Vector (RRBVector) is a persistent, immutable vector data structure that stores elements in a shallow wide tree (typically branching by 16 or 32) to provide efficient random access, updates, appends, concatenation, and slicing while structurally sharing most of its memory between versions.
 
-People use RRBVectors because they combine many of the performance characteristics of arrays with the safety and persistence of immutable data structures, making them particularly well-suited for functional programming, concurrent systems, and applications that frequently create modified versions of large collections without copying the entire structure.
+RRBVectors find use because they combine many of the performance characteristics of arrays with the safety and persistence of immutable data structures, making them particularly well-suited for functional programming, concurrent systems, and applications that frequently create modified versions of large collections without copying the entire structure.
 
 | Operation | Complexity |
 | --------- | ---------- |
