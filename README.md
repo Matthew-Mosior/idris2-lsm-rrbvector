@@ -10,7 +10,7 @@ It uses generation-tracked snapshot publication and safe reclamation of retired 
 
 ![rrbvector-architecture](resources/rrbvector-architecture.png)
 
-Before diving into the over-arching log-structured merge relaxed radix balanced vector (`LSMRRBVector`), it's important to understand the underlying **data model** because every complexity claim comes directly from how the tree is organized.
+Before diving into the over-arching log-structured merge relaxed radix balanced vector (`LSMRRBVector`), it's important to understand the underlying data model because every complexity claim comes directly from how the tree is organized.
 
 ### RRBVector - Summary
 
