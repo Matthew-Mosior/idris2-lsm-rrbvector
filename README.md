@@ -417,7 +417,9 @@ Readers never block the rebuilder service, they read the from one of the not-yet
 
 ![reader-architecture](resources/reader-architecture.png)
 
-## User-facing API (Data.LSMRRBVector)
+## User API
+
+All user functions will be found in the `Data.LSMRRBVector` module.
 
 ### Creation API
 
