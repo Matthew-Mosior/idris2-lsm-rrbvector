@@ -336,7 +336,7 @@ runLowLatencyEmpty :  Ord (Entry a)
 runLowLatencyEmpty rebuilderactions lsmrrbvectoractions =
   runEmptyWith (MkLSMRRBVectorConfig 16) rebuilderactions lsmrrbvectoractions
 
-||| Runs an empty log-structured merge vector. O(1)
+||| Runs an empty log-structured merge vector.
 |||
 export covering
 runEmpty :  Ord (Entry a)

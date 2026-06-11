@@ -63,7 +63,7 @@ data RRBVector a
 
 Shift indicates tree depth.
 
-### Tree Nodes
+### Tree nodes
 
 There are three tree variants:
 
@@ -71,7 +71,7 @@ There are three tree variants:
 - `Unbalanced`
 - `Leaf`
 
-#### Balanced nodes
+### Balanced nodes
 
 Balanced nodes contain children.
 
@@ -91,7 +91,7 @@ Balanced
 └─ Leaf[48..63]
 ```
 
-#### Unbalanced nodes
+### Unbalanced nodes
 
 This is the key RRB innovation.
 
@@ -124,7 +124,7 @@ Meaning:
 20-30  -> child C
 ```
 
-##### Why Unbalanced nodes exist
+#### Why Unbalanced nodes exist
 
 Without them:
 
@@ -147,7 +147,7 @@ and stores cumulative sizes.
 
 Thus, `lookup` can still find elements efficiently.
 
-#### Leaf nodes
+### Leaf nodes
 
 Leaves contain actual elements.
 
@@ -162,13 +162,13 @@ Each level multiplies capacity by 16.
 | 3     | 4096              |
 | 4     | 65536             |
 
-### Structural Sharing
+### Structural sharing
 
 Updates never mutate.
 
 Take `update 500 x` for example, only nodes along one path are copied.
 
-### Why Concatenation Works
+### Why concatenation works
 
 The crucial idea is that a strict radix tree demands every subtree perfectly aligned.  RRB relaxes this, this after `left >< right`, the result may contain:
 
@@ -416,3 +416,28 @@ Readers never block the rebuilder service, they read the from one of the not-yet
 #### Reader architecture
 
 ![reader-architecture](resources/reader-architecture.png)
+
+## User-facing API (Data.LSMRRBVector)
+
+### Creation API
+
+- `runEmptyWith`
+- `runFastWritesEmpty`
+- `runLowLatencyEmpty`
+- `runEmpty`
+
+### Reader API
+
+- `toList`
+- `length`
+- `index`
+- `lookup`
+- `null`
+
+### Writer API
+
+- `append`
+- `prepend`
+- `insert`
+- `delete`
+- `update`
