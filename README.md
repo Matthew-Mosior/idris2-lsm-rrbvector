@@ -419,7 +419,7 @@ Readers never block the rebuilder service, they read the from one of the not-yet
 
 ## User API
 
-All user functions will be found in the `Data.LSMRRBVector` module.
+All user functions exist within the `Data.LSMRRBVector` module.
 
 ### Creation API
 
