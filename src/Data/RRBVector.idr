@@ -3,12 +3,13 @@ module Data.RRBVector
 
 import public Data.RRBVector.Internal
 
-import Control.Monad.ST
 import Data.Array
 import Data.Array.Core
 import Data.Array.Index
 import Data.Array.Indexed
 import Data.Bits
+import Data.Linear.Ref1
+import Data.Linear.Traverse1
 import Data.List
 import Data.List1
 import Data.Maybe
@@ -1021,44 +1022,89 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                     -> (Array (Tree a) -> Tree a)
                     -> Array (Tree a)
     mergeRebalance' sh left center right extract construct =
-      runST $ do
-        nodecounter    <- newSTRef 0
-        subtreecounter <- newSTRef 0
-        newnode        <- newSTRef Lin
-        newsubtree     <- newSTRef Lin
-        newroot        <- newSTRef Lin
-        for_ (toList left ++ toList center ++ toList right) $ \subtree =>
-          for_ (extract subtree) $ \x => do
-            nodecounter' <- readSTRef nodecounter
-            when (nodecounter' == (natToInteger blocksize)) $ do
-              newnode' <- readSTRef newnode
-              modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
-                                                                (snocConcat newnode'))
-                                     )
-              writeSTRef newnode Lin
-              writeSTRef nodecounter 0
-              modifySTRef subtreecounter (\y => y + 1
-                                         )
-              subtreecounter' <- readSTRef subtreecounter
-              when (subtreecounter' == (natToInteger blocksize)) $ do
-                newsubtree' <- readSTRef newsubtree
-                modifySTRef newroot (\y => y :< (computeSizes sh (fromList $ the (List (Tree a)) (cast newsubtree')))
-                                    )
-                writeSTRef newsubtree Lin
-                writeSTRef subtreecounter 0
-            modifySTRef newnode (\y => y :< (fill 1 x)
-                                )
-            modifySTRef nodecounter (\y => y + 1
-                                    )
-        newnode' <- readSTRef newnode
-        modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
-                                                          (snocConcat newnode'))
-                               )
-        newsubtree' <- readSTRef newsubtree
-        modifySTRef newroot (\y => y :< (computeSizes sh (fromList $ the (List (Tree a)) (cast newsubtree')))
-                            )
-        newroot' <- readSTRef newroot
-        pure $ fromList $ the (List (Tree a)) (cast newroot')
+      run1 $ \t =>
+        let nodecounter    # t := ref1 Z t
+            subtreecounter # t := ref1 Z t
+            newnode        # t := ref1 Lin t
+            newsubtree     # t := ref1 Lin t
+            newroot        # t := ref1 Lin t
+            ()             # t := mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct (toList left ++ toList center ++ toList right) t
+            newnode'       # t := read1 newnode t
+            ()             # t := casmod1 newsubtree (\y => y :< (construct $ A (SnocSize newnode')
+                                                                                (snocConcat newnode'))
+                                                     ) t                
+            newsubtree'    # t := read1 newsubtree t
+            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+                                                  ) t
+            newroot'       # t := read1 newroot t
+          in fromList (cast {to=List (Tree a)} newroot') # t
+      where
+        mergeRebalanceSubtreeNodeCounter :  Ref s Nat
+                                         -> Ref s Nat
+                                         -> Ref s (SnocList (Array (Tree a)))
+                                         -> Ref s (SnocList (Tree a))
+                                         -> (Array (Tree a) -> Tree a)
+                                         -> F1' s
+        mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct t =
+          let newnode' # t := read1 newnode t
+              ()       # t := casmod1 newsubtree (\y => y :< (construct $ A (SnocSize newnode')
+                                                                            (snocConcat newnode'))
+                                                 ) t
+              ()       # t := write1 newnode Lin t
+              ()       # t := write1 nodecounter Z t
+            in casmod1 subtreecounter (\y => y + 1) t
+        mergeRebalanceRootSubtreeCounter :  Shift
+                                         -> Ref s Nat
+                                         -> Ref s (SnocList (Tree a))
+                                         -> Ref s (SnocList (Tree a))
+                                         -> F1' s
+        mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot t =
+          let newsubtree' # t := read1 newsubtree t
+              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+                                                 ) t
+              ()          # t := write1 newsubtree Lin t
+            in write1 subtreecounter Z t
+        mergeRebalanceSubtree''' :  Shift
+                                 -> Ref s Nat
+                                 -> Ref s Nat
+                                 -> Ref s (SnocList (Array (Tree a)))
+                                 -> Ref s (SnocList (Tree a))
+                                 -> Ref s (SnocList (Tree a))
+                                 -> (Array (Tree a) -> Tree a)
+                                 -> Tree a
+                                 -> F1' s
+        mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct extractedsubtree t =
+          let nodecounter'    # t := read1 nodecounter t
+              ()              # t := when1 (nodecounter' == blocksize) (mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct) t
+              subtreecounter' # t := read1 subtreecounter t
+              ()              # t := when1 (subtreecounter' == blocksize) (mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot) t
+              ()              # t := casmod1 newnode (\y => y :< (fill 1 extractedsubtree)
+                                                     ) t
+            in casmod1 nodecounter (\y => y + 1) t        
+        mergeRebalanceSubtree'' :  Shift
+                                -> Ref s Nat
+                                -> Ref s Nat
+                                -> Ref s (SnocList (Array (Tree a)))
+                                -> Ref s (SnocList (Tree a))
+                                -> Ref s (SnocList (Tree a))
+                                -> (Tree a -> Array (Tree a))
+                                -> (Array (Tree a) -> Tree a)
+                                -> Tree a
+                                -> F1' s
+        mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct subtree t =
+          traverse1_ (mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct) (extract subtree) t
+        mergeRebalanceSubtree' :  Shift
+                               -> Ref s Nat
+                               -> Ref s Nat
+                               -> Ref s (SnocList (Array (Tree a)))
+                               -> Ref s (SnocList (Tree a))
+                               -> Ref s (SnocList (Tree a))
+                               -> (Tree a -> Array (Tree a))
+                               -> (Array (Tree a) -> Tree a)
+                               -> List (Tree a)
+                               -> F1' s
+        mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct leftcenterright t =
+          traverse1_ (mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct) leftcenterright t
     mergeRebalance'' :  Shift
                      -> Array (Tree a)
                      -> Array (Tree a)
@@ -1067,44 +1113,89 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                      -> (Array a -> Tree a)
                      -> Array (Tree a)
     mergeRebalance'' sh left center right extract construct =
-      runST $ do
-        nodecounter    <- newSTRef 0
-        subtreecounter <- newSTRef 0
-        newnode        <- newSTRef Lin
-        newsubtree     <- newSTRef Lin
-        newroot        <- newSTRef Lin
-        for_ (toList left ++ toList center ++ toList right) $ \subtree =>
-          for_ (extract subtree) $ \x => do
-            nodecounter' <- readSTRef nodecounter
-            when (nodecounter' == (natToInteger blocksize)) $ do
-              newnode' <- readSTRef newnode
-              modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
-                                                                (snocConcat newnode'))
-                                     )
-              writeSTRef newnode Lin
-              writeSTRef nodecounter 0
-              modifySTRef subtreecounter (\y => y + 1
-                                         )
-              subtreecounter' <- readSTRef subtreecounter
-              when (subtreecounter' == (natToInteger blocksize)) $ do
-                newsubtree' <- readSTRef newsubtree
-                modifySTRef newroot (\y => y :< (computeSizes sh (fromList $ the (List (Tree a)) (cast newsubtree')))
-                                    )
-                writeSTRef newsubtree Lin
-                writeSTRef subtreecounter 0
-            modifySTRef newnode (\y => y :< (fill 1 x)
-                                )
-            modifySTRef nodecounter (\y => y + 1
-                                    )
-        newnode' <- readSTRef newnode
-        modifySTRef newsubtree (\y => y :< (construct $ A (SnocSize newnode')
-                                                          (snocConcat newnode'))
-                               )
-        newsubtree' <- readSTRef newsubtree
-        modifySTRef newroot (\y => y :< (computeSizes sh (fromList $ the (List (Tree a)) (cast newsubtree')))
-                            )
-        newroot' <- readSTRef newroot
-        pure $ fromList $ the (List (Tree a)) (cast newroot')
+      run1 $ \t =>
+        let nodecounter    # t := ref1 Z t
+            subtreecounter # t := ref1 Z t
+            newnode        # t := ref1 Lin t
+            newsubtree     # t := ref1 Lin t
+            newroot        # t := ref1 Lin t
+            ()             # t := mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct (toList left ++ toList center ++ toList right) t
+            newnode'       # t := read1 newnode t
+            ()             # t := casmod1 newsubtree (\y => y :< (construct $ A (SnocSize newnode')
+                                                                                (snocConcat newnode'))
+                                                     ) t                
+            newsubtree'    # t := read1 newsubtree t
+            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+                                                  ) t
+            newroot'       # t := read1 newroot t
+          in fromList (cast {to=List (Tree a)} newroot') # t
+      where
+        mergeRebalanceSubtreeNodeCounter :  Ref s Nat
+                                         -> Ref s Nat
+                                         -> Ref s (SnocList (Array a))
+                                         -> Ref s (SnocList (Tree a))
+                                         -> (Array a -> Tree a)
+                                         -> F1' s
+        mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct t =
+          let newnode' # t := read1 newnode t
+              ()       # t := casmod1 newsubtree (\y => y :< (construct $ A (SnocSize newnode')
+                                                                            (snocConcat newnode'))
+                                                 ) t
+              ()       # t := write1 newnode Lin t
+              ()       # t := write1 nodecounter Z t
+            in casmod1 subtreecounter (\y => y + 1) t
+        mergeRebalanceRootSubtreeCounter :  Shift
+                                         -> Ref s Nat
+                                         -> Ref s (SnocList (Tree a))
+                                         -> Ref s (SnocList (Tree a))
+                                         -> F1' s
+        mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot t =
+          let newsubtree' # t := read1 newsubtree t
+              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+                                                 ) t
+              ()          # t := write1 newsubtree Lin t
+            in write1 subtreecounter Z t
+        mergeRebalanceSubtree''' :  Shift
+                                 -> Ref s Nat
+                                 -> Ref s Nat
+                                 -> Ref s (SnocList (Array a))
+                                 -> Ref s (SnocList (Tree a))
+                                 -> Ref s (SnocList (Tree a))
+                                 -> (Array a -> Tree a)
+                                 -> a
+                                 -> F1' s
+        mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct extractedsubtree t =
+          let nodecounter'    # t := read1 nodecounter t
+              ()              # t := when1 (nodecounter' == blocksize) (mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct) t
+              subtreecounter' # t := read1 subtreecounter t
+              ()              # t := when1 (subtreecounter' == blocksize) (mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot) t
+              ()              # t := casmod1 newnode (\y => y :< (fill 1 extractedsubtree)
+                                                     ) t
+            in casmod1 nodecounter (\y => y + 1) t        
+        mergeRebalanceSubtree'' :  Shift
+                                -> Ref s Nat
+                                -> Ref s Nat
+                                -> Ref s (SnocList (Array a))
+                                -> Ref s (SnocList (Tree a))
+                                -> Ref s (SnocList (Tree a))
+                                -> (Tree a -> Array a)
+                                -> (Array a -> Tree a)
+                                -> Tree a
+                                -> F1' s
+        mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct subtree t =
+          traverse1_ (mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct) (extract subtree) t
+        mergeRebalanceSubtree' :  Shift
+                               -> Ref s Nat
+                               -> Ref s Nat
+                               -> Ref s (SnocList (Array a))
+                               -> Ref s (SnocList (Tree a))
+                               -> Ref s (SnocList (Tree a))
+                               -> (Tree a -> Array a)
+                               -> (Array a -> Tree a)
+                               -> List (Tree a)
+                               -> F1' s
+        mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct leftcenterright t =
+          traverse1_ (mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct) leftcenterright t
     mergeRebalance :  Shift
                    -> Array (Tree a)
                    -> Array (Tree a)
