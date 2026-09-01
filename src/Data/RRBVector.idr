@@ -58,85 +58,103 @@ singleton x = Root 1 0 (Leaf $ A 1 $ fill 1 x)
 |||
 export
 fromList :  List a
-         -> RRBVector a
-fromList []  = Empty
-fromList [x] = singleton x
+         -> Maybe (RRBVector a)
+fromList []  =
+  Just Empty
+fromList [x] =
+  Just (singleton x)
 fromList xs  =
-  case nodes Leaf xs of
-    [tree] =>
-      Root (treeSize 0 tree) 0 tree -- tree is a single leaf
-    xs'    =>
-      assert_smaller xs (iterateNodes blockshift xs')
+  let Just nodes'   = nodes Leaf xs
+        | Nothing =>
+            Nothing
+      [tree]        = nodes'
+        | xs' =>
+            assert_smaller xs (iterateNodes blockshift xs')
+      Just treesize = treeSize 0 tree
+        | Nothing =>
+            Nothing
+    in Just (Root treesize 0 tree) -- tree is a single leaf
   where
     nodes :  (Array a -> Tree a)
           -> List a
-          -> List (Tree a)
+          -> (Maybe (List (Tree a)))
     nodes f trees =
-      let (trees', rest) = unsafeAlloc blocksize (go 0 blocksize f trees)
-        in case rest of
-             []    =>
-               [trees']
-             rest' =>
-               (trees' :: nodes f (assert_smaller trees rest'))
+      let Just (trees', rest) = unsafeAlloc blocksize (go 0 blocksize f trees)
+            | Nothing =>
+                Nothing
+          []                  = rest
+            | rest' =>
+                let Just nodes' = nodes f (assert_smaller trees rest')
+                      | Nothing =>
+                          Nothing
+                  in Just (trees' :: nodes')
+        in Just [trees']
       where
         go :  (cur,n : Nat)
            -> (Array a -> Tree a)
            -> List a
-           -> WithMArray n a (Tree a,List a)
+           -> WithMArray n a (Maybe (Tree a, List a))
         go cur n f []        r = T1.do
           res <- unsafeFreeze r
-          pure $ (f $ force $ take cur $ A n res,[])
+          pure (Just (f $ force $ take cur $ A n res,[]))
         go cur n f (x :: xs) r =
           case cur == n of
             True  => T1.do
               res <- unsafeFreeze r
-              pure $ (f $ A n res, x :: xs)
-            False =>
-              case tryNatToFin cur of
-                Nothing   =>
-                  assert_total $ idris_crash "Data.RRBVector.fromList.node: can't convert Nat to Fin"
-                Just cur' => T1.do
-                  set r cur' x
-                  go (S cur) n f xs r
+              pure (Just (f $ A n res, x :: xs))
+            False => T1.do
+              let Just cur' = tryNatToFin cur
+                    | Nothing =>
+                        pure Nothing
+              set r cur' x
+              go (S cur) n f xs r
     nodes' :  (Array (Tree a) -> Tree a)
            -> List (Tree a)
-           -> List (Tree a)
+           -> Maybe (List (Tree a))
     nodes' f trees =
-      let (trees', rest) = unsafeAlloc blocksize (go 0 blocksize f trees)
-        in case rest of
-             []    =>
-               [trees']
-             rest' =>
-               (trees' :: nodes' f (assert_smaller trees rest'))
+      let Just (trees', rest) = unsafeAlloc blocksize (go 0 blocksize f trees)
+            | Nothing =>
+                Nothing
+          []                  = rest
+            | rest' =>
+                let Just nodes'' = nodes' f (assert_smaller trees rest')
+                      | Nothing =>
+                          Nothing
+                  in Just (trees' :: nodes'') 
+        in Just [trees']
       where
         go :  (cur,n : Nat)
            -> (Array (Tree a) -> Tree a)
            -> List (Tree a)
-           -> WithMArray n (Tree a) (Tree a,List (Tree a))
+           -> WithMArray n (Tree a) (Maybe (Tree a, List (Tree a)))
         go cur n f []        r = T1.do
           res <- unsafeFreeze r
-          pure $ (f $ force $ take cur $ A n res,[])
+          pure (Just (f $ force $ take cur $ A n res,[]))
         go cur n f (x :: xs) r =
           case cur == n of
             True  => T1.do
               res <- unsafeFreeze r
-              pure $ (f $ A n res, x :: xs)
-            False =>
-              case tryNatToFin cur of
-                Nothing   =>
-                  assert_total $ idris_crash "Data.RRBVector.fromList.node': can't convert Nat to Fin"
-                Just cur' => T1.do
-                  set r cur' x
-                  go (S cur) n f xs r
+              pure (Just (f $ A n res, x :: xs))
+            False => T1.do
+              let Just cur' = tryNatToFin cur
+                    | Nothing =>
+                        pure Nothing
+              set r cur' x
+              go (S cur) n f xs r
     iterateNodes :  Nat
                  -> List (Tree a)
-                 -> RRBVector a
+                 -> Maybe (RRBVector a)
     iterateNodes sh trees =
-      case nodes' Balanced trees of
-        [tree] =>
-          Root (treeSize sh tree) sh tree
-        trees' =>
-          iterateNodes (up sh) (assert_smaller trees trees')
+      let Just nodes''  = nodes' Balanced trees
+            | Nothing =>
+                Nothing
+          [tree]        = nodes''
+            | trees' =>
+                iterateNodes (up sh) (assert_smaller trees trees')
+          Just treesize = treeSize sh tree
+            | Nothing =>
+                Nothing
+        in Just (Root treesize sh tree)
 
 ||| Creates a vector of length n with every element set to x. O(log n)
 |||
@@ -280,7 +298,7 @@ lookup i (Root size sh tree) =
         GT =>
           Nothing -- index out of range
         LT =>
-          Just $ lookupTree i sh tree
+          lookupTree i sh tree
     EQ =>
       case compare i size of
         EQ =>
@@ -288,41 +306,31 @@ lookup i (Root size sh tree) =
         GT =>
           Nothing -- index out of range
         LT =>
-          Just $ lookupTree i sh tree
+          lookupTree i sh tree
   where
     lookupTree :  Nat
                -> Nat
                -> Tree a
-               -> a
+               -> Maybe a
     lookupTree i sh (Balanced arr)         =
-      case tryNatToFin (radixIndex i sh) of
-        Nothing =>
-          assert_total $ idris_crash "Data.RRBVector.lookup: can't convert Nat to Fin"
-        Just i' =>
-          assert_total $ lookupTree i (down sh) (at arr.arr i')
+      let Just i' = tryNatToFin (radixIndex i sh)
+            | Nothing =>
+                Nothing
+        in assert_total (lookupTree i (down sh) (at arr.arr i'))
     lookupTree i sh (Unbalanced arr sizes) =
-      let (idx, subidx) = relaxedRadixIndex sizes i sh
-        in case tryNatToFin idx of
-             Nothing   =>
-               assert_total $ idris_crash "Data.RRBVector.lookup: can't convert Nat to Fin"
-             Just idx' =>
-               assert_total $ lookupTree subidx (down sh) (at arr.arr idx')
+      let Just (idx, subidx) = relaxedRadixIndex sizes i sh
+            | Nothing =>
+                Nothing
+          Just idx'          = tryNatToFin idx
+            | Nothing =>
+                Nothing
+        in assert_total (lookupTree subidx (down sh) (at arr.arr idx'))
     lookupTree i _ (Leaf arr)              =
-      let i' = integerToNat ((natToInteger i) .&. (natToInteger blockmask))
-        in case tryNatToFin i' of
-             Nothing =>
-               assert_total $ idris_crash "Data.RRBVector.lookup: can't convert Nat to Fin"
-             Just i'' =>
-               at arr.arr i''
-
-||| The element at the index.
-||| Calls 'idris_crash' if the index is out of range. O(log n)
-|||
-export
-index :  Nat
-      -> RRBVector a
-      -> a
-index i = fromMaybe (assert_total $ idris_crash "Data.RRBVector.index: index out of range") . lookup i
+      let i'       = integerToNat ((natToInteger i) .&. (natToInteger blockmask))
+          Just i'' = tryNatToFin i'
+            | Nothing =>
+                Nothing
+        in Just (at arr.arr i'')
 
 ||| A flipped version of lookup. O(log n)
 |||
@@ -331,14 +339,6 @@ export
      -> Nat
      -> Maybe a
 (!?) = flip lookup
-
-||| A flipped version of index. O(log n)
-|||
-export
-(!!) :  RRBVector a
-     -> Nat
-     -> a
-(!!) = flip index
 
 ||| Update the element at the index with a new element.
 ||| If the index is out of range, the original vector is returned. O (log n)
