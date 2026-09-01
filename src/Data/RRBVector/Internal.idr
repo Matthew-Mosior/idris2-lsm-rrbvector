@@ -73,36 +73,38 @@ export
 relaxedRadixIndex :  Array Nat
                   -> Nat
                   -> Shift
-                  -> (Nat, Nat)
+                  -> Maybe (Nat, Nat)
 relaxedRadixIndex sizes i sh =
-  let guess  = radixIndex i sh -- guess <= idx
-      idx    = loop sizes guess
-      subIdx = case idx == 0 of
-                 True  =>
-                   i
-                 False =>
-                   let idx' = case tryNatToFin $ minus idx 1 of
-                                Nothing    =>
-                                  assert_total $ idris_crash "Data.RRBVector.Internal.relaxedRadixIndex: index out of bounds"
-                                Just idx'' =>
-                                  idx''
-                     in minus i (at sizes.arr idx')
-    in (idx, subIdx)
+  let guess        = radixIndex i sh -- guess <= idx
+      Just idx     = loop sizes guess
+        | Nothing =>
+            Nothing
+      subidx       = case idx == 0 of
+                       True  =>
+                         Just i
+                       False =>
+                         let idx'       = tryNatToFin $ minus idx 1
+                             Just idx'' = idx'
+                               | Nothing =>
+                                   Nothing
+                           in Just $ minus i (at sizes.arr idx'')
+      Just subidx' = subidx
+        | Nothing =>
+            Nothing
+    in Just (idx, subidx')
   where
     loop :  Array Nat
          -> Nat
-         -> Nat
+         -> Maybe Nat
     loop sizes idx =
-      let current = case tryNatToFin idx of
-                      Nothing       =>
-                        assert_total $ idris_crash "Data.RRBVector.Internal.relaxedRadixIndex.loop: index out of bounds"
-                      Just idx' =>
-                        at sizes.arr idx' -- idx will always be in range for a well-formed tree
-        in case i < current of
-             True  =>
-               idx
-             False =>
-               assert_total $ loop sizes (plus idx 1)
+      let Just idx' = tryNatToFin idx
+            | Nothing =>
+                Nothing
+          current   = at sizes.arr idx'
+          False     = i < current
+            | True =>
+                Just idx
+        in assert_total $ loop sizes (plus idx 1)
 
 --------------------------------------------------------------------------------
 --          Internal Tree Representation
@@ -250,13 +252,13 @@ singleton x =
 
 export
 treeToArray :  Tree a
-            -> Array (Tree a)
+            -> Maybe (Array (Tree a))
 treeToArray (Balanced arr)     =
-  arr
+  Just arr
 treeToArray (Unbalanced arr _) =
-  arr
+  Just arr
 treeToArray (Leaf _)           =
-  assert_total $ idris_crash "Data.RRBVector.Internal.treeToArray: leaf"
+  Nothing
 
 export
 treeBalanced :  Tree a
@@ -273,32 +275,30 @@ treeBalanced (Leaf _)         =
 export
 treeSize :  Shift
          -> Tree a
-         -> Nat
+         -> Maybe Nat
 treeSize = go 0
   where
     go :  Shift
        -> Shift
        -> Tree a
-       -> Nat
+       -> Maybe Nat
     go acc _  (Leaf arr)             =
-      plus acc arr.size
+      Just $ plus acc arr.size
     go acc _  (Unbalanced arr sizes) =
-      let i = case tryNatToFin $ minus arr.size 1 of
-                Nothing =>
-                  assert_total $ idris_crash "Data.RRBVector.Internal.treeSize: index out of bounds"
-                Just i' =>
-                  i'
-        in plus acc (at sizes.arr i)
+      let i       = tryNatToFin $ minus arr.size 1
+          Just i' = i
+            | Nothing =>
+                Nothing
+        in Just $ plus acc (at sizes.arr i')
     go acc sh (Balanced arr)         =
-      let i  = minus arr.size 1
-          i' = case tryNatToFin i of
-                 Nothing  =>
-                   assert_total $ idris_crash "Data.RRBVector.Internal.treeSize: index out of bounds"
-                 Just i'' =>
-                   i''
+      let i        = minus arr.size 1
+          i'       = tryNatToFin i
+          Just i'' = i'
+            | Nothing =>
+                Nothing
         in go (plus acc (mult i (integerToNat (1 `shiftL` sh))))
               (down sh)
-              (assert_smaller arr (at arr.arr i'))
+              (assert_smaller arr (at arr.arr i''))
 
 ||| Turns an array into a tree node by computing the sizes of its subtrees.
 ||| sh is the shift of the resulting tree.
@@ -306,106 +306,124 @@ treeSize = go 0
 export
 computeSizes :  Shift
              -> Array (Tree a)
-             -> Tree a
+             -> Maybe (Tree a)
 computeSizes sh arr =
-  case isBalanced of
-    True  =>
-      Balanced arr
-    False =>
-      let arrnat = unsafeAlloc arr.size (loop sh 0 0 arr.size (toList arr))
-        in Unbalanced arr arrnat
+  let Just isbalanced = isBalanced
+        | Nothing =>
+            Nothing
+      False           = isbalanced
+        | True =>
+            Just $ Balanced arr
+      arrnat          = unsafeAlloc arr.size (loop sh 0 0 arr.size (toList arr))
+      Just arrnat'    = arrnat
+        | Nothing =>
+            Nothing
+    in Just $ Unbalanced arr arrnat'
   where
     loop :  (sh,cur,acc,n : Nat)
          -> List (Tree a)
-         -> WithMArray n Nat (Array Nat)
+         -> WithMArray n Nat (Maybe (Array Nat))
     loop sh _   acc n []        r = T1.do
       res <- unsafeFreeze r
-      pure $ A n res
+      pure $ Just $ A n res
     loop sh cur acc n (x :: xs) r =
-      case tryNatToFin cur of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.Internal.computeSizes.go: can't convert Nat to Fin"
-        Just cur' =>
-          let acc' = plus acc (treeSize (down sh) x)
-            in T1.do set r cur' acc'
-                     assert_total $ loop sh (S cur) acc' n xs r
+      let Just cur'     = tryNatToFin cur
+            | Nothing =>
+                pure Nothing
+          Just treesize = treeSize (down sh) x
+            | Nothing =>
+                pure Nothing
+          acc'          = plus acc treesize
+        in T1.do set r cur' acc'
+                 assert_total $ loop sh (S cur) acc' n xs r
     maxsize : Integer
     maxsize = 1 `shiftL` sh -- the maximum size of a subtree
     len : Nat
     len = arr.size
     lenM1 : Nat
     lenM1 = minus len 1
-    isBalanced : Bool
+    isBalanced : Maybe Bool
     isBalanced = go 0
       where
         go :  Nat
-           -> Bool
+           -> Maybe Bool
         go i =
-          let subtree = case tryNatToFin i of
-                          Nothing =>
-                            assert_total $ idris_crash "Data.RRBVector.Internal.computeSizes.isBalanced: can't convert Nat to Fin"
-                          Just i' =>
-                            at arr.arr i'
-            in case i < lenM1 of
-                 True  =>
-                   assert_total $ (natToInteger $ treeSize (down sh) subtree) == maxsize && go (plus i 1)
-                 False =>
-                   treeBalanced subtree
+          let Just subtree = tryNatToFin i
+                | Nothing =>
+                    Nothing
+              subtree'     = at arr.arr subtree
+              False        = i < lenM1
+                | True =>
+                    let Just treesize = treeSize (down sh) subtree'
+                          | Nothing =>
+                              Nothing
+                        go'           = assert_total $ go (plus i 1)
+                        Just go''     = go'
+                          | Nothing =>
+                              Nothing
+                      in assert_total $ Just ((natToInteger treesize) == maxsize && go'')
+            in Just $ treeBalanced subtree'
 
 export
 countTrailingZeros :  Nat
-                   -> Nat
+                   -> Maybe Nat
 countTrailingZeros x =
   go 0
   where
     w : Nat
     w = bitSizeOf Int
-    go : Nat -> Nat
+    go :  Nat
+       -> Maybe Nat
     go i =
       case i >= w of
         True  =>
-          i
+          Just i
         False =>
-          case tryNatToFin i of
-            Nothing =>
-              assert_total $ idris_crash "Data.RRBVector.Internal.countTrailingZeros: can't convert Nat to Fin"
-            Just i' =>
-              case testBit (the Int (cast x)) i' of
-                True  =>
-                  i
-                False =>
-                  assert_total $ go (plus i 1)
+          let Just i' = tryNatToFin i
+                | Nothing =>
+                    Nothing
+              False   = testBit (the Int (cast x)) i'
+                | True =>
+                    Just i
+            in assert_total $ go (plus i 1) 
 
 ||| Nat log base 2.
 |||
 export
 log2 :  Nat
-     -> Nat
+     -> Maybe Nat
 log2 x =
-  let bitSizeMinus1 = minus (bitSizeOf Int) 1
-    in minus bitSizeMinus1 (countLeadingZeros x)
+  let bitSizeMinus1          = minus (bitSizeOf Int) 1
+      Just countleadingzeros = countLeadingZeros x
+        | Nothing =>
+            Nothing
+      countleadingzeros'     = minus bitSizeMinus1 countleadingzeros
+    in Just countleadingzeros'
   where
-    countLeadingZeros : Nat -> Nat
+    countLeadingZeros :  Nat
+                      -> Maybe Nat
     countLeadingZeros x =
-      minus (minus w 1) (go (minus w 1))
+      let Just go' = go (minus w 1)
+            | Nothing =>
+                Nothing
+        in Just $ minus (minus w 1) go'
       where
         w : Nat
         w = bitSizeOf Int
-        go : Nat -> Nat
+        go :  Nat
+           -> Maybe Nat
         go i =
           case i < 0 of
             True  =>
-              i
+              Just i
             False =>
-              case tryNatToFin i of
-                Nothing =>
-                  assert_total $ idris_crash "Data.RRBVector.Internal.log2: can't convert Nat to Fin"
-                Just i' =>
-                  case testBit (the Int (cast x)) i' of
-                    True  =>
-                      i
-                    False =>
-                      assert_total $ go (minus i 1)
+              let Just i' = tryNatToFin i
+                    | Nothing =>
+                        Nothing
+                  False   = testBit (the Int (cast x)) i'
+                    | True =>
+                        Just i
+                in assert_total $ go (minus i 1)
 
 --------------------------------------------------------------------------------
 --          RRB Vectors
