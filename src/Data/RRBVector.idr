@@ -514,57 +514,74 @@ private
 takeTree :  Nat
          -> Shift
          -> Tree a
-         -> Tree a
+         -> Maybe (Tree a)
 takeTree i sh (Balanced arr) with (radixIndex i sh) | ((plus (radixIndex i sh) 1) <= arr.size) proof eq
   _ | i' | True  =
-    case tryNatToFin i' of
-      Nothing =>
-        assert_total $ idris_crash "Data.RRBVector.takeTree: can't convert Nat to Fin"
-      Just i'' =>
-        let newarr = force $ take (plus (radixIndex i sh) 1) arr.arr @{lteOpReflectsLTE _ _ eq}
-          in assert_total $ Balanced (A (plus (radixIndex i sh) 1) (updateAt i'' (takeTree i (down sh)) newarr))
+    let Just i''       = tryNatToFin i'
+          | Nothing =>
+              Nothing
+        newarr         = force $ take (plus (radixIndex i sh) 1) arr.arr @{lteOpReflectsLTE _ _ eq}
+        Just takentree = assert_total $ takeTree i (down sh) (Balanced arr)
+          | Nothing =>
+              Nothing
+      in assert_total $ Just (Balanced (A (plus (radixIndex i sh) 1) (setAt i'' takentree newarr)))
   _ | _  | False =
-    assert_total $ idris_crash "Data.RRBVector.takeTree: index out of bounds"
-takeTree i sh (Unbalanced arr sizes) with (relaxedRadixIndex sizes i sh) | ((plus (fst (relaxedRadixIndex sizes i sh)) 1) <= arr.size) proof eq
-  _ | (idx, subidx) | True  =
-    case tryNatToFin idx of
-      Nothing   =>
-        assert_total $ idris_crash "Data.RRBVector.takeTree: can't convert Nat to Fin"
-      Just idx' =>
-        let newarr = force $ take (plus (fst (relaxedRadixIndex sizes i sh)) 1) arr.arr @{lteOpReflectsLTE _ _ eq}
-          in assert_total $ computeSizes sh (A (plus (fst (relaxedRadixIndex sizes i sh)) 1) (updateAt idx' (takeTree subidx (down sh)) newarr))
-  _ | _             | False =
-    assert_total $ idris_crash "Data.RRBVector.takeTree: index out of bounds"
+    Nothing
+takeTree i sh (Unbalanced arr sizes) with (relaxedRadixIndex sizes i sh)
+  _ | Nothing =
+    Nothing
+  _ | Just (idx, subidx) with ((plus idx 1) <= arr.size) proof eq
+    _ | True =
+      let Just idx'      = tryNatToFin idx
+            | Nothing =>
+                Nothing
+          newarr         = force $ take (plus idx 1) arr.arr @{lteOpReflectsLTE _ _ eq}
+          Just takentree = assert_total $ takeTree subidx (down sh) (Unbalanced arr sizes)
+            | Nothing =>
+                Nothing
+        in assert_total $ computeSizes sh (A (plus idx 1) (setAt idx' takentree newarr))
+    _ | False =
+         Nothing 
 takeTree i _ (Leaf arr) with (integerToNat (((natToInteger i) .&. (natToInteger blockmask)) + 1) <= arr.size) proof eq
   _ | True  =
     let newarr = force $ take (integerToNat (((natToInteger i) .&. (natToInteger blockmask)) + 1)) arr.arr @{lteOpReflectsLTE _ _ eq}
-      in Leaf (A (integerToNat (((natToInteger i) .&. (natToInteger blockmask)) + 1)) newarr)
+      in Just (Leaf (A (integerToNat (((natToInteger i) .&. (natToInteger blockmask)) + 1)) newarr))
   _ | False =
-    assert_total $ idris_crash "Data.RRBVector.takeTree: index out of bounds"
+    Nothing
 
 private
 dropTree :  Nat
          -> Shift
          -> Tree a
-         -> Tree a
-dropTree n sh (Balanced arr) =
-  case tryNatToFin 0 of
-    Nothing   =>
-      assert_total $ idris_crash "Data.RRBVector.dropTree: can't convert Nat to Fin"
-    Just zero =>
-      let newarr = force $ drop (radixIndex n sh) arr.arr
-        in assert_total $ computeSizes sh (A (minus arr.size (radixIndex n sh)) (updateAt zero (dropTree n (down sh)) newarr))
-dropTree n sh (Unbalanced arr sizes) =
-  case tryNatToFin 0 of
-    Nothing   =>
-      assert_total $ idris_crash "Data.RRBVector.dropTree: can't convert Nat to Fin"
-    Just zero =>
-      let newarr = force $ drop (fst $ relaxedRadixIndex sizes n sh) arr.arr
-        in assert_total $ computeSizes sh (A (minus arr.size (fst $ relaxedRadixIndex sizes n sh)) (updateAt zero (dropTree (snd $ relaxedRadixIndex sizes n sh) (down sh)) newarr))
-dropTree n _  (Leaf arr) =
+         -> Maybe (Tree a)
+dropTree n sh (Balanced arr)         =
+  let Just zero        = tryNatToFin 0
+        | Nothing =>
+            Nothing
+      newarr           = force $ drop (radixIndex n sh) arr.arr
+      Just droppedtree = assert_total $ dropTree n (down sh) (Balanced arr)
+        | Nothing =>
+            Nothing
+    in assert_total $ computeSizes sh (A (minus arr.size (radixIndex n sh)) (setAt zero droppedtree newarr))
+dropTree n sh (Unbalanced arr sizes) with (relaxedRadixIndex sizes n sh)
+  _ | Nothing =
+    Nothing
+  _ | Just (idx, subidx) with (minus arr.size idx <= arr.size)
+    _ | True = 
+      let Just zero          = tryNatToFin 0
+            | Nothing =>
+                Nothing
+          newarr             = force $ drop idx arr.arr
+          Just droppedtree   = assert_total $ dropTree subidx (down sh) (Unbalanced arr sizes)
+            | Nothing =>
+                Nothing
+        in assert_total $ computeSizes sh (A (minus arr.size idx) (setAt zero droppedtree newarr))
+    _ | False =
+      Nothing
+dropTree n _  (Leaf arr)             =
   let n      = integerToNat ((natToInteger n) .&. (natToInteger blockmask))
       newarr = force $ drop n arr.arr
-    in Leaf (A (minus arr.size n) newarr)
+    in Just (Leaf (A (minus arr.size n) newarr))
 
 ||| The first i elements of the vector.
 ||| If the vector contains less than or equal to i elements, the whole vector is returned. O(log n)
@@ -572,22 +589,26 @@ dropTree n _  (Leaf arr) =
 export
 take :  Nat
      -> RRBVector a
-     -> RRBVector a
-take _ Empty                 = Empty
+     -> Maybe (RRBVector a)
+take _ Empty                 =
+  Just Empty
 take n v@(Root size sh tree) =
   case compare n 0 of
     LT =>
-      empty
+      Just empty
     EQ =>
-      empty
+      Just empty
     GT =>
       case compare n size of
         LT =>
-          normalize $ Root n sh (takeTree (minus n 1) sh tree)
+          let Just takentree = takeTree (minus n 1) sh tree
+                | Nothing =>
+                    Nothing
+            in normalize $ Root n sh takentree
         EQ =>
-          v
+          Just v
         GT =>
-          v
+          Just v
 
 ||| The vector without the first i elements.
 ||| If the vector contains less than or equal to i elements, the empty vector is returned. O(log n)
@@ -595,46 +616,61 @@ take n v@(Root size sh tree) =
 export
 drop :  Nat
      -> RRBVector a
-     -> RRBVector a
-drop _ Empty                 = Empty
+     -> Maybe (RRBVector a)
+drop _ Empty                 =
+  Just Empty
 drop n v@(Root size sh tree) =
   case compare n 0 of
     LT =>
-      v
+      Just v
     EQ =>
-      v
+      Just v
     GT =>
       case compare n size of
         LT =>
-          normalize $ Root (minus size n) sh (dropTree n sh tree)
+          let Just droppedtree = dropTree n sh tree
+                | Nothing =>
+                    Nothing
+            in normalize $ Root (minus size n) sh droppedtree
         EQ =>
-          empty
+          Just empty
         GT =>
-          empty
+          Just empty
 
 ||| Split the vector at the given index. O(log n)
 |||
 export
 splitAt :  Nat
         -> RRBVector a
-        -> (RRBVector a, RRBVector a)
-splitAt _ Empty                 = (Empty, Empty)
+        -> Maybe (RRBVector a, RRBVector a)
+splitAt _ Empty                 =
+  Just (Empty, Empty)
 splitAt n v@(Root size sh tree) =
   case compare n 0 of
     LT =>
-      (empty, v)
+      Just (empty, v)
     EQ =>
-      (empty, v)
+      Just (empty, v)
     GT =>
       case compare n size of
         LT =>
-          let left  = normalize $ Root n sh (takeTree (minus n 1) sh tree)
-              right = normalize $ Root (minus size n) sh (dropTree n sh tree)
-            in (left, right)
+          let Just takentree   = takeTree (minus n 1) sh tree
+                | Nothing =>
+                    Nothing
+              Just left        = normalize $ Root n sh takentree
+                | Nothing =>
+                    Nothing
+              Just droppedtree = dropTree n sh tree
+                | Nothing =>
+                    Nothing
+              Just right       = normalize $ Root (minus size n) sh droppedtree
+                | Nothing =>
+                    Nothing
+            in Just (left, right)
         EQ =>
-          (v, empty)
+          Just (v, empty)
         GT =>
-          (v, empty)
+          Just (v, empty)
 
 --------------------------------------------------------------------------------
 --          Deconstruction
@@ -645,9 +681,12 @@ splitAt n v@(Root size sh tree) =
 export
 viewl :  RRBVector a
       -> Maybe (a, RRBVector a)
-viewl Empty             = Nothing
+viewl Empty             =
+  Nothing
 viewl v@(Root _ _ tree) =
-  let tail = drop 1 v
+  let Just tail = drop 1 v
+        | Nothing =>
+            Nothing
     in Just (headTree tree, tail)
   where
     headTree : Tree a -> a
@@ -675,9 +714,12 @@ viewl v@(Root _ _ tree) =
 export
 viewr :  RRBVector a
       -> Maybe (RRBVector a, a)
-viewr Empty                = Nothing
+viewr Empty                =
+  Nothing
 viewr v@(Root size _ tree) =
-  let init = take (minus size 1) v
+  let Just init = take (minus size 1) v
+        | Nothing =>
+            Nothing
     in Just (init, lastTree tree)
   where
     lastTree : Tree a -> a
@@ -725,19 +767,19 @@ map f (Root size sh tree) = Root size sh (mapTree tree)
 |||
 export
 reverse :  RRBVector a
-        -> RRBVector a
+        -> Maybe (RRBVector a)
 reverse v =
   case compare (length v) 1 of
     LT =>
-      v
+      Just v
     EQ =>
-      v
+      Just v
     GT =>
-      case fromList $ toList v of
-        Nothing =>
-          assert_total $ idris_crash "Data.RRBVector.reverse: can't convert to List1"
-        Just v' =>
-          fromList $ forget $ reverse v'
+      let Just v'  = Data.List1.fromList $ toList v
+            | Nothing =>
+                Nothing
+          v''      = Data.List1.reverse v'
+        in fromList $ forget v''
 
 ||| Take two vectors and return a vector of corresponding pairs.
 ||| If one input is longer, excess elements are discarded from the right end. O(min(n1,n2))
@@ -745,17 +787,15 @@ reverse v =
 export
 zip :  RRBVector a
     -> RRBVector b
-    -> RRBVector (a, b)
+    -> Maybe (RRBVector (a, b))
 zip v1 v2 =
-  case fromList $ toList v1 of
-    Nothing  =>
-      assert_total $ idris_crash "Data.RRBVector.zip: can't convert to List1"
-    Just v1' =>
-      case fromList $ toList v2 of
-        Nothing  =>
-          assert_total $ idris_crash "Data.RRBVector.zip: can't convert to List1"
-        Just v2' =>
-          fromList $ forget $ zip v1' v2'
+  let Just v1' = Data.List1.fromList $ toList v1
+        | Nothing =>
+            Nothing
+      Just v2' = Data.List1.fromList $ toList v2
+        | Nothing =>
+            Nothing
+    in fromList $ forget $ zip v1' v2'
 
 --------------------------------------------------------------------------------
 --          Concatenation
