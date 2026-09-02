@@ -388,7 +388,7 @@ update i x v@(Root size sh tree) =
           Just updatedtree = assert_total $ updateTree i (down sh) (Balanced arr)
             | Nothing =>
                 Nothing
-        in assert_total $ Just (Balanced (A arr.size (setAt i' updatedtree arr.arr))) 
+        in Just (Balanced (A arr.size (setAt i' updatedtree arr.arr))) 
     updateTree i sh (Unbalanced arr sizes) =
       let Just (idx, subidx) = relaxedRadixIndex sizes i sh
             | Nothing =>
@@ -399,7 +399,7 @@ update i x v@(Root size sh tree) =
           Just updatedtree   = assert_total $ updateTree subidx (down sh) (Unbalanced arr sizes)
             | Nothing =>
                 Nothing
-        in assert_total $ Just (Unbalanced (A arr.size (setAt idx' updatedtree arr.arr)) sizes)
+        in Just (Unbalanced (A arr.size (setAt idx' updatedtree arr.arr)) sizes)
     updateTree i _ (Leaf arr)              =
       let i'       = integerToNat ((natToInteger i) .&. (natToInteger blockmask))
           Just i'' = tryNatToFin i'
@@ -455,7 +455,7 @@ adjust i f v@(Root size sh tree) =
           Just adjustedtree = assert_total $ adjustTree i (down sh) (Balanced arr)
             | Nothing =>
                 Nothing
-        in assert_total $ Just (Balanced (A arr.size (setAt i' adjustedtree arr.arr)))
+        in Just (Balanced (A arr.size (setAt i' adjustedtree arr.arr)))
     adjustTree i sh (Unbalanced arr sizes) =
       let Just (idx, subidx) = relaxedRadixIndex sizes i sh
             | Nothing =>
@@ -466,7 +466,7 @@ adjust i f v@(Root size sh tree) =
           Just adjustedtree  = assert_total $ adjustTree subidx (down sh) (Unbalanced arr sizes)
             | Nothing =>
                 Nothing
-        in assert_total $ Just (Unbalanced (A arr.size (setAt idx' adjustedtree arr.arr)) sizes)
+        in Just (Unbalanced (A arr.size (setAt idx' adjustedtree arr.arr)) sizes)
     adjustTree i _ (Leaf arr)              =
       let i'       = integerToNat ((natToInteger i) .&. (natToInteger blockmask))
           Just i'' = tryNatToFin i'
@@ -476,33 +476,37 @@ adjust i f v@(Root size sh tree) =
 
 private
 normalize :  RRBVector a
-          -> RRBVector a
+          -> Maybe (RRBVector a)
 normalize v@(Root size sh (Balanced arr))     =
   case compare arr.size 1 of
     LT =>
-      v
+      Just v
     EQ =>
-      case tryNatToFin 0 of
-        Nothing =>
-          assert_total $ idris_crash "Data.RRBVector.normalize: can't convert Nat to Fin"
-        Just i  =>
-          assert_total $ normalize $ Root size (down sh) (at arr.arr i)
+      let Just i = tryNatToFin 0
+            | Nothing =>
+                Nothing
+          Just normalized = assert_total $ normalize $ Root size (down sh) (at arr.arr i)
+            | Nothing =>
+                Nothing
+        in Just normalized
     GT =>
-      v
+      Just v
 normalize v@(Root size sh (Unbalanced arr _)) =
   case compare arr.size 1 of
     LT =>
-      v
+      Just v
     EQ =>
-      case tryNatToFin 0 of
-        Nothing =>
-          assert_total $ idris_crash "Data.RRBVector.normalize: can't convert Nat to Fin"
-        Just i  =>
-          assert_total $ normalize $ Root size (down sh) (at arr.arr i)
+      let Just i = tryNatToFin 0
+            | Nothing =>
+                Nothing
+          Just normalized = assert_total $ normalize $ Root size (down sh) (at arr.arr i)
+            | Nothing =>
+                Nothing
+        in Just normalized
     GT =>
-      v
+      Just v
 normalize v                                   =
-  v
+  Just v
 
 ||| The initial i is n - 1 (the index of the last element in the new tree).
 |||
