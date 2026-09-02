@@ -815,17 +815,30 @@ newBranch x sh = assert_total $ Balanced (singleton $ newBranch x (down sh))
 export
 (<|) :  a
      -> RRBVector a
-     -> RRBVector a
-x <| Empty             = singleton x
+     -> Maybe (RRBVector a)
+x <| Empty             =
+  Just (singleton x)
 x <| Root size sh tree =
-  case compare insertshift sh of
-    LT =>
-      Root (plus size 1) sh (consTree sh tree)
-    EQ =>
-      Root (plus size 1) sh (consTree sh tree)
-    GT =>
-      let new = A 2 $ array $ fromList [(newBranch x sh), tree]
-        in Root (plus size 1) insertshift (computeSizes insertshift new)
+  let Just insertshift' = insertshift
+        | Nothing =>
+            Nothing
+    in case compare insertshift' sh of
+         LT =>
+           let Just consedtree = assert_total $ consTree sh tree
+                 | Nothing =>
+                     Nothing
+             in Just (Root (plus size 1) sh consedtree)
+         EQ =>
+           let Just consedtree = assert_total $ consTree sh tree
+                 | Nothing =>
+                     Nothing
+             in Just (Root (plus size 1) sh consedtree)
+         GT =>
+           let new               = A 2 $ array $ fromList [(newBranch x sh), tree]
+               Just computesizes = computeSizes insertshift' new
+                 | Nothing =>
+                     Nothing
+             in Just (Root (plus size 1) insertshift' computesizes)
   where
     -- compute the shift at which the new branch needs to be inserted (0 means there is space in the leaf)
     -- the size is computed for efficient calculation of the shift in a balanced subtree
@@ -833,17 +846,20 @@ x <| Root size sh tree =
                  -> Nat
                  -> Nat
                  -> Tree a
-                 -> Nat
+                 -> Maybe Nat
     computeShift sz sh min (Balanced _)          =
       -- @sz - 1@ is the index of the last element
-      let hishift  = let comp = mult (log2 (minus sz 1) `div` blockshift) blockshift  -- the shift of the root when normalizing
-                       in case compare comp 0 of
-                            LT =>
-                              0
-                            EQ =>
-                              0
-                            GT =>
-                              comp
+      let Just log2' = log2 ((minus sz 1) `div` blockshift)
+            | Nothing =>
+                Nothing
+          hishift    = let comp = mult log2' blockshift  -- the shift of the root when normalizing
+                         in case compare comp 0 of
+                              LT =>
+                                0
+                              EQ =>
+                                0
+                              GT =>
+                                comp
           hi       = (natToInteger $ minus sz 1) `shiftR` hishift -- the length of the root node when normalizing minus 1
           newshift = case compare hi (natToInteger blockmask) of
                        LT =>
@@ -854,77 +870,95 @@ x <| Root size sh tree =
                          plus hishift blockshift
         in case compare newshift sh of
              LT =>
-               newshift
+               Just newshift
              EQ =>
-               newshift
+               Just newshift
              GT =>
-               min
+               Just min
     computeShift _ sh min (Unbalanced arr sizes) =
-      let sz'     = case tryNatToFin 0 of
-                      Nothing   =>
-                        assert_total $ idris_crash "Data.RRBVector.(<|).computeShift.Unbalanced: can't convert Nat to Fin"
-                      Just zero =>
-                        at sizes.arr zero -- the size of the first subtree
-          newtree = case tryNatToFin 0 of
-                      Nothing   =>
-                        assert_total $ idris_crash "Data.RRBVector.(<|).computeShift.Unbalanced: can't convert Nat to Fin"
-                      Just zero =>
-                        at arr.arr zero
-          newmin  = case compare arr.size blocksize of
-                      LT =>
-                        sh
-                      EQ =>
-                        min
-                      GT =>
-                        min
-        in assert_total $ computeShift sz' (down sh) newmin newtree
+      let sz'           = do let Just zero = tryNatToFin 0
+                                   | Nothing =>
+                                       Nothing
+                             Just (at sizes.arr zero)
+          Just sz''     = sz'
+            | Nothing =>
+                Nothing
+          newtree       = do let Just zero = tryNatToFin 0
+                                   | Nothing =>
+                                       Nothing
+                             Just (at arr.arr zero)
+          Just newtree' = newtree
+            | Nothing =>
+                Nothing
+          newmin        = case compare arr.size blocksize of
+                            LT =>
+                              sh
+                            EQ =>
+                              min
+                            GT =>
+                              min
+        in assert_total $ computeShift sz'' (down sh) newmin newtree'
     computeShift _ _ min (Leaf arr)              =
       case compare arr.size blocksize of
         LT =>
-          0
+          Just 0
         EQ =>
-          min
+          Just min
         GT =>
-          min
-    insertshift : Nat
+          Just min
+    insertshift : Maybe Nat
     insertshift = computeShift size sh (up sh) tree
     consTree :  Nat
              -> Tree a
-             -> Tree a
-    consTree sh (Balanced arr)     =
-      case compare sh insertshift of
-        LT =>
-          case tryNatToFin 0 of
-            Nothing   =>
-              assert_total $ idris_crash "Data.RRBVector.(<|).consTree.Balanced: can't convert Nat to Fin"
-            Just zero =>
-              assert_total $ computeSizes sh (A arr.size $ updateAt zero (consTree (down sh)) arr.arr)
-        EQ =>
-          computeSizes sh (A (S arr.size) (append (fill 1 (newBranch x (down sh))) arr.arr))
-        GT =>
-          case tryNatToFin 0 of
-            Nothing   =>
-              assert_total $ idris_crash "Data.RRBVector.(<|).consTree.Balanced: can't convert Nat to Fin"
-            Just zero =>
-              assert_total $ computeSizes sh (A arr.size $ updateAt zero (consTree (down sh)) arr.arr)
-    consTree sh (Unbalanced arr _) =
-      case compare sh insertshift of
-        LT =>
-          case tryNatToFin 0 of
-            Nothing   =>
-              assert_total $ idris_crash "Data.RRBVector.(<|).consTree.Unbalanced: can't convert Nat to Fin"
-            Just zero =>
-              assert_total $ computeSizes sh (A arr.size $ updateAt zero (consTree (down sh)) arr.arr)
-        EQ =>
-          computeSizes sh (A (S arr.size) (append (fill 1 (newBranch x (down sh))) arr.arr))
-        GT =>
-          case tryNatToFin 0 of
-            Nothing   =>
-              assert_total $ idris_crash "Data.RRBVector.(<|).consTree.Unbalanced: can't convert Nat to Fin"
-            Just zero =>
-              assert_total $ computeSizes sh (A arr.size $ updateAt zero (consTree (down sh)) arr.arr)
-    consTree _ (Leaf arr)          =
-      Leaf (A (S arr.size) (append (fill 1 x) arr.arr))
+             -> Maybe (Tree a)
+    consTree sh (Balanced arr)         =
+      let Just insertshift' = insertshift
+            | Nothing =>
+                Nothing
+        in case compare sh insertshift' of
+             LT =>
+               let Just zero       = tryNatToFin 0
+                     | Nothing =>
+                         Nothing
+                   Just consedtree = assert_total $ consTree (down sh) (Balanced arr)
+                     | Nothing =>
+                         Nothing
+                 in assert_total $ computeSizes sh (A arr.size $ setAt zero consedtree arr.arr)
+             EQ =>
+               computeSizes sh (A (S arr.size) (append (fill 1 (newBranch x (down sh))) arr.arr))
+             GT =>
+               let Just zero       = tryNatToFin 0
+                     | Nothing =>
+                         Nothing
+                   Just consedtree = assert_total $ consTree (down sh) (Balanced arr)
+                     | Nothing =>
+                         Nothing
+                 in assert_total $ computeSizes sh (A arr.size $ setAt zero consedtree arr.arr)
+    consTree sh (Unbalanced arr sizes) =
+      let Just insertshift' = insertshift
+            | Nothing =>
+                Nothing
+        in case compare sh insertshift' of
+             LT =>
+               let Just zero       = tryNatToFin 0
+                     | Nothing =>
+                         Nothing
+                   Just consedtree = assert_total $ consTree (down sh) (Unbalanced arr sizes)
+                     | Nothing =>
+                         Nothing
+                 in assert_total $ computeSizes sh (A arr.size $ setAt zero consedtree arr.arr)
+             EQ =>
+               computeSizes sh (A (S arr.size) (append (fill 1 (newBranch x (down sh))) arr.arr))
+             GT =>
+               let Just zero       = tryNatToFin 0
+                     | Nothing =>
+                         Nothing
+                   Just consedtree = assert_total $ consTree (down sh) (Unbalanced arr sizes)
+                     | Nothing =>
+                         Nothing
+                 in assert_total $ computeSizes sh (A arr.size $ setAt zero consedtree arr.arr)
+    consTree _ (Leaf arr)              =
+      Just (Leaf (A (S arr.size) (append (fill 1 x) arr.arr)))
 
 ||| Add an element to the right end of the vector. O(log n)
 |||
