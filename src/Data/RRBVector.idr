@@ -521,7 +521,7 @@ takeTree i sh (Balanced arr) with (radixIndex i sh) | ((plus (radixIndex i sh) 1
           | Nothing =>
               Nothing
         newarr         = force $ take (plus (radixIndex i sh) 1) arr.arr @{lteOpReflectsLTE _ _ eq}
-        Just takentree = assert_total $ takeTree i (down sh) (Balanced arr)
+        Just takentree = assert_total $ takeTree i (down sh) (Balanced (A (plus (radixIndex i sh) 1) newarr))
           | Nothing =>
               Nothing
       in assert_total $ Just (Balanced (A (plus (radixIndex i sh) 1) (setAt i'' takentree newarr)))
@@ -536,7 +536,7 @@ takeTree i sh (Unbalanced arr sizes) with (relaxedRadixIndex sizes i sh)
             | Nothing =>
                 Nothing
           newarr         = force $ take (plus idx 1) arr.arr @{lteOpReflectsLTE _ _ eq}
-          Just takentree = assert_total $ takeTree subidx (down sh) (Unbalanced arr sizes)
+          Just takentree = assert_total $ takeTree subidx (down sh) (Unbalanced (A (plus idx 1) newarr) sizes)
             | Nothing =>
                 Nothing
         in assert_total $ computeSizes sh (A (plus idx 1) (setAt idx' takentree newarr))
@@ -559,7 +559,7 @@ dropTree n sh (Balanced arr)         =
         | Nothing =>
             Nothing
       newarr           = force $ drop (radixIndex n sh) arr.arr
-      Just droppedtree = assert_total $ dropTree n (down sh) (Balanced arr)
+      Just droppedtree = assert_total $ dropTree n (down sh) (Balanced (A (minus arr.size (radixIndex n sh)) newarr))
         | Nothing =>
             Nothing
     in assert_total $ computeSizes sh (A (minus arr.size (radixIndex n sh)) (setAt zero droppedtree newarr))
@@ -572,7 +572,7 @@ dropTree n sh (Unbalanced arr sizes) with (relaxedRadixIndex sizes n sh)
             | Nothing =>
                 Nothing
           newarr             = force $ drop idx arr.arr
-          Just droppedtree   = assert_total $ dropTree subidx (down sh) (Unbalanced arr sizes)
+          Just droppedtree   = assert_total $ dropTree subidx (down sh) (Unbalanced (A (minus arr.size idx) newarr) sizes)
             | Nothing =>
                 Nothing
         in assert_total $ computeSizes sh (A (minus arr.size idx) (setAt zero droppedtree newarr))
@@ -687,27 +687,28 @@ viewl v@(Root _ _ tree) =
   let Just tail = drop 1 v
         | Nothing =>
             Nothing
-    in Just (headTree tree, tail)
+      Just headedtree = headTree tree
+        | Nothing =>
+            Nothing
+    in Just (headedtree, tail)
   where
-    headTree : Tree a -> a
+    headTree :  Tree a
+             -> Maybe a
     headTree (Balanced arr)     =
-      case tryNatToFin 0 of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.viewl: can't convert Nat to Fin"
-        Just zero =>
-          assert_total $ headTree (at arr.arr zero)
+      let Just zero  = tryNatToFin 0
+            | Nothing =>
+                Nothing
+        in assert_total $ headTree (at arr.arr zero)
     headTree (Unbalanced arr _) =
-      case tryNatToFin 0 of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.viewl: can't convert Nat to Fin"
-        Just zero =>
-          assert_total $ headTree (at arr.arr zero)
+      let Just zero = tryNatToFin 0
+            | Nothing =>
+                Nothing
+        in assert_total $ headTree (at arr.arr zero)
     headTree (Leaf arr)         =
-      case tryNatToFin 0 of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.viewl: can't convert Nat to Fin"
-        Just zero =>
-          at arr.arr zero
+      let Just zero = tryNatToFin 0
+            | Nothing =>
+                Nothing
+        in Just (at arr.arr zero)
 
 ||| The vector without the last element and the last element, or 'Nothing' if the vector is empty. O(log n)
 |||
