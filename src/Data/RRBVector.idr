@@ -1551,18 +1551,5 @@ Foldable RRBVector where
   null                = null
 
 export
-Applicative RRBVector where
-  pure      = singleton
-  fs <*> xs = Data.RRBVector.foldl (\acc, f => acc >< map f xs) empty fs
-
-export
-Semigroup (RRBVector a) where
-  (<+>) = (><)
-
-export
 Semigroup (RRBVector a) => Monoid (RRBVector a) where
   neutral = empty
-
-export
-Monad RRBVector where
-  xs >>= f = Data.RRBVector.foldl (\acc, x => acc >< f x) empty xs
