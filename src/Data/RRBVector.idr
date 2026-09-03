@@ -9,6 +9,7 @@ import Data.Array.Index
 import Data.Array.Indexed
 import Data.Bits
 import Data.Linear.Ref1
+import Data.Linear.Token
 import Data.Linear.Traverse1
 import Data.List
 import Data.List1
@@ -1121,41 +1122,50 @@ Root size sh tree |> x =
 export
 (><) :  RRBVector a
      -> RRBVector a
-     -> RRBVector a
-Empty                >< v                    = v
-v                    >< Empty                = v
+     -> Maybe (RRBVector a)
+Empty                >< v                    =
+  Just v
+v                    >< Empty                =
+  Just v
 Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
-  let upmaxshift = case compare sh1 sh2 of
-                     LT =>
-                       up sh2
-                     EQ =>
-                       up sh1
-                     GT =>
-                       up sh1
-      newarr     = mergeTrees tree1 sh1 tree2 sh2
-    in normalize $ Root (plus size1 size2) upmaxshift (computeSizes upmaxshift newarr)
+  let upmaxshift        = case compare sh1 sh2 of
+                            LT =>
+                              up sh2
+                            EQ =>
+                              up sh1
+                            GT =>
+                              up sh1
+      Just newarr            = mergeTrees tree1 sh1 tree2 sh2
+        | Nothing =>
+            Nothing
+      Just computesizes = computeSizes upmaxshift newarr
+        | Nothing =>
+            Nothing
+    in normalize $ Root (plus size1 size2) upmaxshift computesizes
   where
-    viewlArr : Array (Tree a) -> (Tree a, Array (Tree a))
+    viewlArr :  Array (Tree a)
+             -> Maybe (Tree a, Array (Tree a))
     viewlArr arr =
-      case tryNatToFin 0 of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.(><).viewlArr: can't convert Nat to Fin"
-        Just zero =>
-          (at arr.arr zero, drop 1 arr)
-    viewrArr : Array (Tree b) -> (Array (Tree b), Tree b)
+      let Just zero = tryNatToFin 0
+            | Nothing =>
+                Nothing
+          dropped   = drop 1 arr
+        in Just (at arr.arr zero, dropped)
+    viewrArr :  Array (Tree b)
+             -> Maybe (Array (Tree b), Tree b)
     viewrArr arr =
-      case tryNatToFin $ minus arr.size 1 of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.(><).viewrArr: can't convert Nat to Fin"
-        Just last =>
-          (take (minus arr.size 1) arr, at arr.arr last)
+      let Just last  = tryNatToFin (minus arr.size 1)
+            | Nothing =>
+                Nothing
+          taken      = take (minus arr.size 1) arr
+        in Just (taken, at arr.arr last)
     mergeRebalance' :  Shift
                     -> Array (Tree a)
                     -> Array (Tree a)
                     -> Array (Tree a)
-                    -> (Tree a -> Array (Tree a))
-                    -> (Array (Tree a) -> Tree a)
-                    -> Array (Tree a)
+                    -> (Tree a -> Maybe (Array (Tree a)))
+                    -> (Array (Tree a) -> Maybe (Tree a))
+                    -> Maybe (Array (Tree a))
     mergeRebalance' sh left center right extract construct =
       run1 $ \t =>
         let nodecounter    # t := ref1 Z t
@@ -1163,90 +1173,116 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
             newnode        # t := ref1 Lin t
             newsubtree     # t := ref1 Lin t
             newroot        # t := ref1 Lin t
-            ()             # t := mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct (toList left ++ toList center ++ toList right) t
+            results        # t := mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct (toList left ++ toList center ++ toList right) t
+            False              := any (== Nothing) results
+              | True =>
+                  Nothing # t
             newnode'       # t := read1 newnode t
-            ()             # t := casmod1 newsubtree (\y => y :< (construct $ A (SnocSize newnode')
-                                                                                (snocConcat newnode'))
+            Just constructed   := construct $ A (SnocSize newnode')
+                                                (snocConcat newnode')
+              | Nothing =>
+                  Nothing # t
+            ()             # t := casmod1 newsubtree (\y => y :< constructed
                                                      ) t                
             newsubtree'    # t := read1 newsubtree t
-            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+            Just computesizes  := computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree'))
+              | Nothing =>
+                  Nothing # t
+            ()             # t := casmod1 newroot (\y => y :< computesizes
                                                   ) t
             newroot'       # t := read1 newroot t
-          in fromList (cast {to=List (Tree a)} newroot') # t
+          in Just (fromList (cast {to=List (Tree a)} newroot')) # t
       where
         mergeRebalanceSubtreeNodeCounter :  Ref s Nat
                                          -> Ref s Nat
                                          -> Ref s (SnocList (Array (Tree a)))
                                          -> Ref s (SnocList (Tree a))
-                                         -> (Array (Tree a) -> Tree a)
-                                         -> F1' s
+                                         -> (Array (Tree a) -> Maybe (Tree a))
+                                         -> F1 s (Maybe ())
         mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct t =
-          let newnode' # t := read1 newnode t
-              ()       # t := casmod1 newsubtree (\y => y :< (construct $ A (SnocSize newnode')
-                                                                            (snocConcat newnode'))
-                                                 ) t
-              ()       # t := write1 newnode Lin t
-              ()       # t := write1 nodecounter Z t
-            in casmod1 subtreecounter (\y => y + 1) t
+          let newnode'     # t := read1 newnode t
+              Just constructed := construct $ A (SnocSize newnode')
+                                                (snocConcat newnode')
+                | Nothing =>
+                    Nothing # t
+              ()           # t := casmod1 newsubtree (\y => y :< constructed
+                                                     ) t
+              ()           # t := write1 newnode Lin t
+              ()           # t := write1 nodecounter Z t
+              ()           # t := casmod1 subtreecounter (\y => y + 1) t
+            in Just () # t
         mergeRebalanceRootSubtreeCounter :  Shift
                                          -> Ref s Nat
                                          -> Ref s (SnocList (Tree a))
                                          -> Ref s (SnocList (Tree a))
-                                         -> F1' s
+                                         -> F1 s (Maybe ())
         mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot t =
-          let newsubtree' # t := read1 newsubtree t
-              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+          let newsubtree'   # t := read1 newsubtree t
+              Just computesizes := computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree'))
+                | Nothing =>
+                    Nothing # t
+              ()            # t := casmod1 newroot (\y => y :< computesizes
                                                  ) t
-              ()          # t := write1 newsubtree Lin t
-            in write1 subtreecounter Z t
+              ()            # t := write1 newsubtree Lin t
+              ()            # t := write1 subtreecounter Z t
+            in Just () # t
         mergeRebalanceSubtree''' :  Shift
                                  -> Ref s Nat
                                  -> Ref s Nat
                                  -> Ref s (SnocList (Array (Tree a)))
                                  -> Ref s (SnocList (Tree a))
                                  -> Ref s (SnocList (Tree a))
-                                 -> (Array (Tree a) -> Tree a)
+                                 -> (Array (Tree a) -> Maybe (Tree a))
                                  -> Tree a
-                                 -> F1' s
+                                 -> F1 s (Maybe ())
         mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct extractedsubtree t =
           let nodecounter'    # t := read1 nodecounter t
-              ()              # t := when1 (nodecounter' == blocksize) (mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct) t
+              Just ()         # t := maybeUnit1 (nodecounter' == blocksize) (mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct) t
+                | Nothing # t =>
+                    Nothing # t
               subtreecounter' # t := read1 subtreecounter t
-              ()              # t := when1 (subtreecounter' == blocksize) (mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot) t
+              Just ()         # t := maybeUnit1 (subtreecounter' == blocksize) (mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot) t
+                | Nothing # t =>
+                    Nothing # t
               ()              # t := casmod1 newnode (\y => y :< (fill 1 extractedsubtree)
                                                      ) t
-            in casmod1 nodecounter (\y => y + 1) t        
+              ()              # t := casmod1 nodecounter (\y => y + 1) t
+            in Just () # t       
         mergeRebalanceSubtree'' :  Shift
                                 -> Ref s Nat
                                 -> Ref s Nat
                                 -> Ref s (SnocList (Array (Tree a)))
                                 -> Ref s (SnocList (Tree a))
                                 -> Ref s (SnocList (Tree a))
-                                -> (Tree a -> Array (Tree a))
-                                -> (Array (Tree a) -> Tree a)
+                                -> (Tree a -> Maybe (Array (Tree a)))
+                                -> (Array (Tree a) -> Maybe (Tree a))
                                 -> Tree a
-                                -> F1' s
+                                -> F1 s (Array (Maybe ()))
         mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct subtree t =
-          traverse1_ (mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct) (extract subtree) t
+          let Just extracted := extract subtree
+                | Nothing =>
+                    fromList [Nothing] # t
+            in traverse1 (mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct) extracted t
         mergeRebalanceSubtree' :  Shift
                                -> Ref s Nat
                                -> Ref s Nat
                                -> Ref s (SnocList (Array (Tree a)))
                                -> Ref s (SnocList (Tree a))
                                -> Ref s (SnocList (Tree a))
-                               -> (Tree a -> Array (Tree a))
-                               -> (Array (Tree a) -> Tree a)
+                               -> (Tree a -> Maybe (Array (Tree a)))
+                               -> (Array (Tree a) -> Maybe (Tree a))
                                -> List (Tree a)
-                               -> F1' s
+                               -> F1 s (List (Maybe ()))
         mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct leftcenterright t =
-          traverse1_ (mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct) leftcenterright t
+          let results # t := traverse1 (mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct) leftcenterright t
+            in concat (Prelude.map Prelude.Interfaces.toList results) # t
     mergeRebalance'' :  Shift
                      -> Array (Tree a)
                      -> Array (Tree a)
                      -> Array (Tree a)
                      -> (Tree a -> Array a)
                      -> (Array a -> Tree a)
-                     -> Array (Tree a)
+                     -> Maybe (Array (Tree a))
     mergeRebalance'' sh left center right extract construct =
       run1 $ \t =>
         let nodecounter    # t := ref1 Z t
@@ -1254,16 +1290,22 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
             newnode        # t := ref1 Lin t
             newsubtree     # t := ref1 Lin t
             newroot        # t := ref1 Lin t
-            ()             # t := mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct (toList left ++ toList center ++ toList right) t
+            results        # t := mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct (toList left ++ toList center ++ toList right) t
+            False              := any (== Nothing) results
+              | True =>
+                  Nothing # t
             newnode'       # t := read1 newnode t
             ()             # t := casmod1 newsubtree (\y => y :< (construct $ A (SnocSize newnode')
                                                                                 (snocConcat newnode'))
                                                      ) t                
             newsubtree'    # t := read1 newsubtree t
-            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+            Just computesizes  := computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree'))
+              | Nothing =>
+                  Nothing # t
+            ()             # t := casmod1 newroot (\y => y :< computesizes
                                                   ) t
             newroot'       # t := read1 newroot t
-          in fromList (cast {to=List (Tree a)} newroot') # t
+          in Just (fromList (cast {to=List (Tree a)} newroot')) # t
       where
         mergeRebalanceSubtreeNodeCounter :  Ref s Nat
                                          -> Ref s Nat
@@ -1283,13 +1325,17 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                          -> Ref s Nat
                                          -> Ref s (SnocList (Tree a))
                                          -> Ref s (SnocList (Tree a))
-                                         -> F1' s
+                                         -> F1 s (Maybe ())
         mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot t =
-          let newsubtree' # t := read1 newsubtree t
-              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
-                                                 ) t
-              ()          # t := write1 newsubtree Lin t
-            in write1 subtreecounter Z t
+          let newsubtree'   # t := read1 newsubtree t
+              Just computesizes := computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree'))
+                | Nothing =>
+                    Nothing # t
+              ()            # t := casmod1 newroot (\y => y :< computesizes
+                                                   ) t
+              ()            # t := write1 newsubtree Lin t
+              ()            # t := write1 subtreecounter Z t
+            in Just () # t
         mergeRebalanceSubtree''' :  Shift
                                  -> Ref s Nat
                                  -> Ref s Nat
@@ -1298,15 +1344,18 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                  -> Ref s (SnocList (Tree a))
                                  -> (Array a -> Tree a)
                                  -> a
-                                 -> F1' s
+                                 -> F1 s (Maybe ())
         mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct extractedsubtree t =
           let nodecounter'    # t := read1 nodecounter t
               ()              # t := when1 (nodecounter' == blocksize) (mergeRebalanceSubtreeNodeCounter nodecounter subtreecounter newnode newsubtree construct) t
               subtreecounter' # t := read1 subtreecounter t
-              ()              # t := when1 (subtreecounter' == blocksize) (mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot) t
+              Just ()         # t := maybeUnit1 (subtreecounter' == blocksize) (mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot) t
+                | Nothing # t =>
+                    Nothing # t
               ()              # t := casmod1 newnode (\y => y :< (fill 1 extractedsubtree)
                                                      ) t
-            in casmod1 nodecounter (\y => y + 1) t        
+              ()              # t := casmod1 nodecounter (\y => y + 1) t
+            in Just () # t
         mergeRebalanceSubtree'' :  Shift
                                 -> Ref s Nat
                                 -> Ref s Nat
@@ -1316,9 +1365,9 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                 -> (Tree a -> Array a)
                                 -> (Array a -> Tree a)
                                 -> Tree a
-                                -> F1' s
+                                -> F1 s (Array (Maybe ()))
         mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct subtree t =
-          traverse1_ (mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct) (extract subtree) t
+          traverse1 (mergeRebalanceSubtree''' sh nodecounter subtreecounter newnode newsubtree newroot construct) (extract subtree) t
         mergeRebalanceSubtree' :  Shift
                                -> Ref s Nat
                                -> Ref s Nat
@@ -1328,14 +1377,15 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                -> (Tree a -> Array a)
                                -> (Array a -> Tree a)
                                -> List (Tree a)
-                               -> F1' s
+                               -> F1 s (List (Maybe ()))
         mergeRebalanceSubtree' sh nodecounter subtreecounter newnode newsubtree newroot extract construct leftcenterright t =
-          traverse1_ (mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct) leftcenterright t
+          let results # t := traverse1 (mergeRebalanceSubtree'' sh nodecounter subtreecounter newnode newsubtree newroot extract construct) leftcenterright t
+            in concat (Prelude.map Prelude.Interfaces.toList results) # t
     mergeRebalance :  Shift
                    -> Array (Tree a)
                    -> Array (Tree a)
                    -> Array (Tree a)
-                   -> Array (Tree a)
+                   -> Maybe (Array (Tree a))
     mergeRebalance sh left center right =
       case compare sh blockshift of
         LT =>
@@ -1348,53 +1398,75 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                -> Nat
                -> Tree a
                -> Nat
-               -> Array (Tree a)
+               -> Maybe (Array (Tree a))
     mergeTrees tree1@(Leaf arr1) _   tree2@(Leaf arr2) _   =
       case compare arr1.size blocksize of
         LT =>
           let arr' = A (plus arr1.size arr2.size) (append arr1.arr arr2.arr)
             in case compare arr'.size blocksize of
                  LT =>
-                   singleton $ Leaf arr'
+                   Just (singleton $ Leaf arr')
                  EQ =>
-                   singleton $ Leaf arr'
+                   Just (singleton $ Leaf arr')
                  GT =>
                    let (left, right) = (take blocksize arr',drop blocksize arr')
                        lefttree      = Leaf left
                        righttree     = Leaf right
-                     in A 2 $ fromPairs 2 lefttree [(1,righttree)]
+                     in Just (A 2 $ fromPairs 2 lefttree [(1,righttree)])
         EQ =>
-          A 2 $ fromPairs 2 tree1 [(1,tree2)]
+          Just (A 2 $ fromPairs 2 tree1 [(1,tree2)])
         GT =>
           let arr' = A (plus arr1.size arr2.size) (append arr1.arr arr2.arr)
             in case compare arr'.size blocksize of
                  LT =>
-                   singleton $ Leaf arr'
+                   Just (singleton $ Leaf arr')
                  EQ =>
-                   singleton $ Leaf arr'
+                   Just (singleton $ Leaf arr')
                  GT =>
                    let (left, right) = (take blocksize arr',drop blocksize arr')
                        lefttree      = Leaf left
                        righttree     = Leaf right
-                     in A 2 $ fromPairs 2 lefttree [(1,righttree)]
+                     in Just (A 2 $ fromPairs 2 lefttree [(1,righttree)])
     mergeTrees tree1             sh1 tree2             sh2 =
       case compare sh1 sh2 of
         LT =>
-          let right                  = treeToArray tree2
-              (righthead, righttail) = viewlArr right
-              merged                 = assert_total $ mergeTrees tree1 sh1 righthead (down sh2)
+          let Just right                  = treeToArray tree2
+                | Nothing =>
+                    Nothing
+              Just (righthead, righttail) = viewlArr right
+                | Nothing =>
+                    Nothing
+              Just merged                 = assert_total $ mergeTrees tree1 sh1 righthead (down sh2)
+                | Nothing =>
+                    Nothing
             in mergeRebalance sh2 empty merged righttail
         GT =>
-          let left                 = treeToArray tree1
-              (leftinit, leftlast) = viewrArr left
-              merged               = assert_total $ mergeTrees leftlast (down sh1) tree2 sh2
+          let Just left                 = treeToArray tree1
+                | Nothing =>
+                    Nothing
+              Just (leftinit, leftlast) = viewrArr left
+                | Nothing =>
+                    Nothing
+              Just merged               = assert_total $ mergeTrees leftlast (down sh1) tree2 sh2
+                | Nothing =>
+                    Nothing
             in mergeRebalance sh1 leftinit merged empty
         EQ =>
-          let left                   = treeToArray tree1
-              right                  = treeToArray tree2
-              (leftinit, leftlast)   = viewrArr left
-              (righthead, righttail) = viewlArr right
-              merged                 = assert_total $ mergeTrees leftlast (down sh1) righthead (down sh2)
+          let Just left                   = treeToArray tree1
+                | Nothing =>
+                    Nothing
+              Just right                  = treeToArray tree2
+                | Nothing =>
+                    Nothing
+              Just (leftinit, leftlast)   = viewrArr left
+                | Nothing =>
+                    Nothing
+              Just (righthead, righttail) = viewlArr right
+                | Nothing =>
+                    Nothing
+              Just merged                 = assert_total $ mergeTrees leftlast (down sh1) righthead (down sh2)
+                | Nothing =>
+                    Nothing
             in mergeRebalance sh1 leftinit merged righttail
 
 ||| Insert an element at the given index, shifting the rest of the vector over.
@@ -1405,10 +1477,15 @@ export
 insertAt :  Nat
          -> a
          -> RRBVector a
-         -> RRBVector a
+         -> Maybe (RRBVector a)
 insertAt i x v =
-  let (left, right) = splitAt i v
-    in (left |> x) >< right
+  let Just (left, right) = splitAt i v
+        | Nothing =>
+            Nothing
+      Just left'         = left |> x
+        | Nothing =>
+            Nothing
+    in left' >< right
 
 ||| Delete the element at the given index.
 ||| If the index is out of range, return the original vector. O(log n)
@@ -1416,10 +1493,15 @@ insertAt i x v =
 export
 deleteAt :  Nat
          -> RRBVector a
-         -> RRBVector a
+         -> Maybe (RRBVector a)
 deleteAt i v =
-  let (left, right) = splitAt (plus i 1) v
-    in take i left >< right
+  let Just (left, right) = splitAt (plus i 1) v
+        | Nothing =>
+            Nothing
+      Just left'         = take i left
+        | Nothing =>
+            Nothing
+    in left' >< right
 
 --------------------------------------------------------------------------------
 --          Show Utilities (RRB-Vector)
