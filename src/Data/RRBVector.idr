@@ -721,27 +721,28 @@ viewr v@(Root size _ tree) =
   let Just init = take (minus size 1) v
         | Nothing =>
             Nothing
-    in Just (init, lastTree tree)
+      Just lastedtree = lastTree tree
+        | Nothing =>
+            Nothing
+    in Just (init, lastedtree)
   where
-    lastTree : Tree a -> a
+    lastTree :  Tree a
+             -> Maybe a
     lastTree (Balanced arr)     =
-      case tryNatToFin (minus size 1) of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.viewr: can't convert Nat to Fin"
-        Just last =>
-          assert_total $ lastTree (at arr.arr last)
+      let Just last = tryNatToFin (minus size 1)
+            | Nothing =>
+                Nothing
+        in assert_total $ lastTree (at arr.arr last)
     lastTree (Unbalanced arr _) =
-      case tryNatToFin (minus size 1) of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.viewr: can't convert Nat to Fin"
-        Just last =>
-          assert_total $ lastTree (at arr.arr last)
+      let Just last = tryNatToFin (minus size 1)
+            | Nothing =>
+                Nothing
+        in assert_total $ lastTree (at arr.arr last)
     lastTree (Leaf arr)         =
-      case tryNatToFin (minus size 1) of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.viewr: can't convert Nat to Fin"
-        Just last =>
-          at arr.arr last
+      let Just last = tryNatToFin (minus size 1)
+            | Nothing =>
+                Nothing
+        in Just (at arr.arr last)
 
 --------------------------------------------------------------------------------
 --          Transformation
