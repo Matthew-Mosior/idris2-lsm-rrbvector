@@ -102,41 +102,6 @@ radixIndex :  Nat
            -> Nat
 radixIndex i sh = integerToNat ((natToInteger i) `shiftR` sh .&. (natToInteger blockmask))
 
-export
-relaxedRadixIndex :  Array Nat
-                  -> Nat
-                  -> Shift
-                  -> (Nat, Nat)
-relaxedRadixIndex sizes i sh =
-  let guess  = radixIndex i sh -- guess <= idx
-      idx    = loop sizes guess
-      subIdx = case idx == 0 of
-                 True  =>
-                   i
-                 False =>
-                   let idx' = case tryNatToFin $ minus idx 1 of
-                                Nothing    =>
-                                  assert_total $ idris_crash "Data.RRBVector.Internal.relaxedRadixIndex: index out of bounds"
-                                Just idx'' =>
-                                  idx''
-                     in minus i (at sizes.arr idx')
-    in (idx, subIdx)
-  where
-    loop :  Array Nat
-         -> Nat
-         -> Nat
-    loop sizes idx =
-      let current = case tryNatToFin idx of
-                      Nothing       =>
-                        assert_total $ idris_crash "Data.RRBVector.Internal.relaxedRadixIndex.loop: index out of bounds"
-                      Just idx' =>
-                        at sizes.arr idx' -- idx will always be in range for a well-formed tree
-        in case i < current of
-             True  =>
-               idx
-             False =>
-               assert_total $ loop sizes (plus idx 1)
-
 --------------------------------------------------------------------------------
 --          Internal Tree Representation
 --------------------------------------------------------------------------------
@@ -422,6 +387,88 @@ treeSize =
           child       : Tree a
           child       = lastAt children
        in go acc' (down sh) (assert_smaller children child)
+
+||| Locate the child subtree containing a logical index in a relaxed node.
+|||
+||| The size table contains cumulative subtree sizes and has exactly `n`
+||| entries, one for each child in the corresponding `RelaxedChildren`.
+|||
+||| The radix-derived initial guess is a lower bound on the actual child
+||| position. The search advances through the cumulative size table until it
+||| finds the first entry greater than `i`.
+|||
+||| The returned `RelaxedIndex` carries the selected child as `Fin n`, so the
+||| caller can index the corresponding child array directly without performing
+||| another `Nat`-to-`Fin` conversion.
+|||
+||| For a well-formed relaxed node and a logical index belonging to that node:
+|||
+||| - the initial radix guess is strictly smaller than `n`, and
+||| - whenever the current cumulative size does not contain `i`, another size
+|||   entry exists.
+|||
+||| These two structural invariants are supplied as erased proofs and therefore
+||| introduce no runtime bounds checks.
+|||
+export
+relaxedRadixIndex :
+     {n : Nat}
+  -> {auto 0 nonEmpty : LT 0 n}
+  -> IArray n Nat
+  -> Nat
+  -> Shift
+  -> RelaxedIndex n
+relaxedRadixIndex {n} sizes i sh =
+  let guess : Nat
+      guess =
+        radixIndex i sh
+
+      0 guessLT : LT guess n
+      guessLT =
+        believe_me ()
+
+      child : Fin n
+      child =
+        natToFinLT guess @{guessLT}
+
+   in assert_total $ loop child
+  where
+    ||| Compute the logical index relative to a selected child.
+    childOffset : Fin n -> Nat
+    childOffset FZ =
+      i
+
+    childOffset (FS previous) =
+      minus i (at sizes (weaken previous))
+
+    ||| Search forward through the cumulative size table.
+    loop : Fin n -> RelaxedIndex n
+    loop child =
+      let current : Nat
+          current =
+            at sizes child
+
+       in case i < current of
+            True =>
+              MkRelaxedIndex
+                child
+                (childOffset child)
+
+            False =>
+              let next : Nat
+                  next =
+                    S (finToNat child)
+
+                  0 nextLT : LT next n
+                  nextLT =
+                    believe_me ()
+
+                  nextChild : Fin n
+                  nextChild =
+                    natToFinLT next @{nextLT}
+
+               in assert_total $
+                    loop nextChild
 
 ||| Turns a valid collection of child nodes into an internal tree node.
 |||
