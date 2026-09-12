@@ -6,6 +6,7 @@ import Data.Array.Core
 import Data.Array.Index
 import Data.Array.Indexed
 import Data.Bits
+import Data.Fin
 import Data.List
 import Data.Nat
 import Data.String
@@ -388,10 +389,11 @@ treeSize =
           child       = lastAt children
        in go acc' (down sh) (assert_smaller children child)
 
+
 ||| Locate the child subtree containing a logical index in a relaxed node.
 |||
 ||| The size table contains cumulative subtree sizes and has exactly `n`
-||| entries, one for each child in the corresponding `RelaxedChildren`.
+||| entries, one for each child in the corresponding relaxed node.
 |||
 ||| The radix-derived initial guess is a lower bound on the actual child
 ||| position. The search advances through the cumulative size table until it
@@ -402,73 +404,64 @@ treeSize =
 ||| another `Nat`-to-`Fin` conversion.
 |||
 ||| For a well-formed relaxed node and a logical index belonging to that node:
-|||
-||| - the initial radix guess is strictly smaller than `n`, and
+||| - the initial radix guess is strictly smaller than the number of children
 ||| - whenever the current cumulative size does not contain `i`, another size
 |||   entry exists.
 |||
-||| These two structural invariants are supplied as erased proofs and therefore
+||| These structural invariants are supplied as erased proofs and therefore
 ||| introduce no runtime bounds checks.
 |||
 export
-relaxedRadixIndex :
-     {n : Nat}
-  -> {auto 0 nonEmpty : LT 0 n}
-  -> IArray n Nat
-  -> Nat
-  -> Shift
-  -> RelaxedIndex n
-relaxedRadixIndex {n} sizes i sh =
-  let guess : Nat
-      guess =
-        radixIndex i sh
-
-      0 guessLT : LT guess n
-      guessLT =
-        believe_me ()
-
-      child : Fin n
-      child =
-        natToFinLT guess @{guessLT}
-
-   in assert_total $ loop child
+relaxedRadixIndex :  {n : Nat}
+                  -> {auto 0 nonEmpty : LT 0 n}
+                  -> IArray n Nat
+                  -> Nat
+                  -> Shift
+                  -> RelaxedIndex n
+relaxedRadixIndex {n = Z} {nonEmpty} sizes i sh impossible
+relaxedRadixIndex {n = S k} sizes i sh =
+  let guess     : Nat
+      guess     = radixIndex i sh
+      0 guessLT : LT guess (S k)
+      guessLT   = believe_me ()
+      child     : Fin (S k)
+      child     = natToFinLT guess @{guessLT}
+    in assert_total (loop child)
   where
-    ||| Compute the logical index relative to a selected child.
-    childOffset : Fin n -> Nat
+    ||| Compute the logical index relative to the selected child.
+    |||
+    ||| For the first child, the logical index is already relative to that
+    ||| child. For later children, the cumulative size of the preceding child
+    ||| is subtracted from the logical index.
+    |||
+    childOffset :  Fin (S k)
+                -> Nat
     childOffset FZ =
       i
-
     childOffset (FS previous) =
       minus i (at sizes (weaken previous))
-
-    ||| Search forward through the cumulative size table.
-    loop : Fin n -> RelaxedIndex n
+    ||| Search forward through the cumulative size table for the first child
+    ||| whose cumulative size is greater than the requested logical index.
+    |||
+    ||| The search itself carries a bounded `Fin (S k)` child index, so reading
+    ||| the size table requires no runtime `Nat`-to-`Fin` conversion.
+    |||
+    loop :  Fin (S k)
+         -> RelaxedIndex (S k)
     loop child =
       let current : Nat
-          current =
-            at sizes child
-
+          current = at sizes child
        in case i < current of
-            True =>
-              MkRelaxedIndex
-                child
-                (childOffset child)
-
+            True  =>
+              MkRelaxedIndex child (childOffset child)
             False =>
-              let next : Nat
-                  next =
-                    S (finToNat child)
-
-                  0 nextLT : LT next n
-                  nextLT =
-                    believe_me ()
-
-                  nextChild : Fin n
-                  nextChild =
-                    natToFinLT next @{nextLT}
-
-               in assert_total $
-                    loop nextChild
+              let next      : Nat
+                  next      = S (finToNat child)
+                  0 nextLT  : LT next (S k)
+                  nextLT    = believe_me ()
+                  nextchild : Fin (S k)
+                  nextchild = natToFinLT next @{nextLT}
+                in assert_total (loop nextchild)
 
 ||| Turns a valid collection of child nodes into an internal tree node.
 |||
@@ -532,60 +525,79 @@ computeSizes sh children@(MkChildren {n} {nonEmpty} {withinBlock} trees) =
           subtree = ix trees (S k)
        in assert_total ((natToInteger $ treeSize (down sh) subtree) == maxsize && isBalanced (S k))
 
+||| Count the number of consecutive zero bits beginning at the least
+||| significant bit of a natural number.
+|||
+||| Bit positions are traversed from least significant to most significant.
+||| The `Ix` witness carries the current valid bit position within the fixed
+||| width of `Int`, so no `tryNatToFin` conversion is required.
+|||
+||| If no set bit is found, the full bit width of `Int` is returned.
+|||
 export
 countTrailingZeros :  Nat
                    -> Nat
 countTrailingZeros x =
-  go 0
+  go (bitSizeOf Int)
   where
-    w : Nat
-    w = bitSizeOf Int
-    go : Nat -> Nat
-    go i =
-      case i >= w of
-        True  =>
-          i
-        False =>
-          case tryNatToFin i of
-            Nothing =>
-              assert_total $ idris_crash "Data.RRBVector.Internal.countTrailingZeros: can't convert Nat to Fin"
-            Just i' =>
-              case testBit (the Int (cast x)) i' of
-                True  =>
-                  i
-                False =>
-                  assert_total $ go (plus i 1)
+    value : Int
+    value = cast x
+    ||| Scan bit positions from least significant to most significant.
+    |||
+    go :  (remaining : Nat)
+       -> {auto pos : Ix remaining (bitSizeOf Int)}
+       -> Nat
+    go Z           =
+      bitSizeOf Int
+    go (S k) {pos} =
+      let bit : Fin (bitSizeOf Int)
+          bit = ixToFin pos
+       in case testBit value bit of
+            True  =>
+              finToNat bit
+            False =>
+              assert_total (go k)
 
-||| Nat log base 2.
+||| Compute the base-2 logarithm of a natural number, rounded down.
+|||
+||| The implementation scans the fixed-width `Int` representation from the
+||| most significant bit toward the least significant bit and returns the
+||| position of the first set bit.
+|||
+||| The recursive `LTE remaining (bitSizeOf Int)` proof guarantees that every
+||| tested bit position is valid. The proof is erased, and conversion to
+||| `Fin (bitSizeOf Int)` therefore requires no dynamic `Nat`-to-`Fin`
+||| bounds check.
+|||
+||| `log2 0` is defined as `0`.
 |||
 export
 log2 :  Nat
      -> Nat
 log2 x =
-  let bitSizeMinus1 = minus (bitSizeOf Int) 1
-    in minus bitSizeMinus1 (countLeadingZeros x)
+  go (bitSizeOf Int)
   where
-    countLeadingZeros : Nat -> Nat
-    countLeadingZeros x =
-      minus (minus w 1) (go (minus w 1))
-      where
-        w : Nat
-        w = bitSizeOf Int
-        go : Nat -> Nat
-        go i =
-          case i < 0 of
+    value : Int
+    value = cast x
+    ||| Scan bit positions from most significant to least significant.
+    |||
+    ||| In the `S k` case, `valid` has type
+    ||| `LTE (S k) (bitSizeOf Int)`, which is definitionally the proof
+    ||| required for `LT k (bitSizeOf Int)`.
+    |||
+    go :  (remaining : Nat)
+       -> {auto 0 valid : LTE remaining (bitSizeOf Int)}
+       -> Nat
+    go Z =
+      Z
+    go (S k) {valid} =
+      let bit : Fin (bitSizeOf Int)
+          bit = natToFinLT k @{valid}
+       in case testBit value bit of
             True  =>
-              i
+              k
             False =>
-              case tryNatToFin i of
-                Nothing =>
-                  assert_total $ idris_crash "Data.RRBVector.Internal.log2: can't convert Nat to Fin"
-                Just i' =>
-                  case testBit (the Int (cast x)) i' of
-                    True  =>
-                      i
-                    False =>
-                      assert_total $ go (minus i 1)
+              assert_total (go k {valid = lteSuccLeft valid})
 
 --------------------------------------------------------------------------------
 --          RRB Vectors
