@@ -38,6 +38,104 @@ export
 infixl 5 |>
 
 --------------------------------------------------------------------------------
+--          Utilities
+--------------------------------------------------------------------------------
+
+||| Transport an indexed array across an equality of its lengths.
+|||
+||| The equality proof is erased at runtime, so this introduces no runtime
+||| conversion or allocation.
+|||
+private
+%inline
+castIArray :  {m, n : Nat}
+           -> (0 prf : m = n)
+           -> IArray m a
+           -> IArray n a
+castIArray Refl arr =
+  arr
+
+||| Reflexivity of `LTE` for natural numbers.
+|||
+||| This proof is erased at runtime.
+|||
+private
+0 lteReflNat :  (n : Nat)
+             -> LTE n n
+lteReflNat Z     =
+  LTEZero
+lteReflNat (S n) =
+  LTESucc (lteReflNat n)
+
+||| Adding one on the right of a natural number is its successor.
+|||
+private
+0 plusOneRight :  (n : Nat)
+               -> plus n 1 = S n
+plusOneRight Z     =
+  Refl
+plusOneRight (S n) =
+  cong S (plusOneRight n)
+
+||| Construct a bounded child collection by appending one child to an indexed
+||| array.
+|||
+||| The resulting collection is statically nonempty. The equality between
+||| `n + 1` and `S n` is proved and erased at runtime.
+|||
+private
+childrenSnoc :  {n : Nat}
+             -> IArray n (Tree a)
+             -> Tree a
+             -> Children a
+childrenSnoc {n} xs x =
+  let arr  : IArray (plus n 1) (Tree a)
+      arr  = append xs (fill 1 x)
+      arr' : IArray (S n) (Tree a)
+      arr' = castIArray (plusOneRight n) arr
+    in MkChildren {n = S n} {nonEmpty = LTESucc LTEZero} {withinBlock = believe_me ()} arr'
+
+||| Construct a bounded child collection by prepending one child to an indexed
+||| array.
+|||
+||| The resulting collection is statically nonempty, and the child count is
+||| carried directly in the resulting `Children`.
+|||
+||| The branching-factor proof is erased at runtime.
+|||
+private
+childrenCons :  {n : Nat}
+             -> Tree a
+             -> IArray n (Tree a)
+             -> Children a
+childrenCons {n} x xs =
+  MkChildren {n = S n} {nonEmpty = LTESucc LTEZero} {withinBlock = believe_me ()} (append (fill 1 x) xs)
+
+||| Construct a bounded nonempty child collection from an internal array.
+|||
+||| Callers must maintain the RRB invariant that the array is nonempty and
+||| contains no more than `blocksize` children. The branching-factor proof is
+||| erased at runtime.
+|||
+private
+childrenFromArray :  Array (Tree a)
+                  -> Children a
+childrenFromArray (A Z _) =
+  assert_total (idris_crash "Data.RRBVector.childrenFromArray: empty child array")
+childrenFromArray (A (S n) arr) =
+  MkChildren {nonEmpty = LTESucc LTEZero} {withinBlock = believe_me ()} arr
+
+||| The final valid index of a statically nonempty collection.
+|||
+private %inline
+lastFin :  {n : Nat}
+        -> Fin (S n)
+lastFin {n = Z} =
+  FZ
+lastFin {n = S k} =
+  FS lastFin
+
+--------------------------------------------------------------------------------
 --          Creating RRB-Vectors
 --------------------------------------------------------------------------------
 
@@ -56,89 +154,142 @@ singleton x = Root 1 0 (Leaf $ A 1 $ fill 1 x)
 
 ||| Create a new vector from a list. O(n)
 |||
+||| Leaf and internal-node arrays are filled from left to right using `Ix`.
+||| The `Ix remaining n` witness carries the current valid array position, so
+||| writes require no dynamic `Nat`-to-`Fin` conversion.
+|||
 export
-fromList :  List a
-         -> RRBVector a
-fromList []  = Empty
-fromList [x] = singleton x
+fromList :
+     List a
+  -> RRBVector a
+fromList []  =
+  Empty
+fromList [x] =
+  singleton x
 fromList xs  =
   case nodes Leaf xs of
     [tree] =>
-      Root (treeSize 0 tree) 0 tree -- tree is a single leaf
-    xs'    =>
+      Root (treeSize 0 tree) 0 tree
+    xs' =>
       assert_smaller xs (iterateNodes blockshift xs')
   where
+    ||| Build leaf-sized nodes from a list.
+    |||
+    ||| `remaining` is the number of writable array positions still available.
+    ||| The `Ix remaining n` witness identifies the current forward position
+    ||| and converts directly to `Fin n` through `ixToFin`.
+    |||
     nodes :  (Array a -> Tree a)
           -> List a
           -> List (Tree a)
     nodes f trees =
-      let (trees', rest) = unsafeAlloc blocksize (go 0 blocksize f trees)
+      let (tree, rest) = unsafeAlloc blocksize (go {n = blocksize} blocksize f trees)
         in case rest of
-             []    =>
-               [trees']
-             rest' =>
-               (trees' :: nodes f (assert_smaller trees rest'))
+            [] =>
+              [tree]
+            rest' =>
+              tree :: nodes f (assert_smaller trees rest')
       where
-        go :  (cur,n : Nat)
+        ||| Fill one array from left to right.
+        |||
+        ||| When the input list is exhausted before the array is full,
+        ||| `ixToNat pos` is the number of positions that were written.
+        |||
+        ||| When `remaining` reaches zero, the array is full and the
+        ||| unconsumed input list is returned for construction of the next
+        ||| node.
+        |||
+        go :  {n : Nat}
+           -> (remaining : Nat)
+           -> {auto pos : Ix remaining n}
            -> (Array a -> Tree a)
            -> List a
-           -> WithMArray n a (Tree a,List a)
-        go cur n f []        r = T1.do
+           -> WithMArray n a (Tree a, List a)
+        go {n} remaining {pos} f [] r      = T1.do
           res <- unsafeFreeze r
-          pure $ (f $ force $ take cur $ A n res,[])
-        go cur n f (x :: xs) r =
-          case cur == n of
-            True  => T1.do
-              res <- unsafeFreeze r
-              pure $ (f $ A n res, x :: xs)
-            False =>
-              case tryNatToFin cur of
-                Nothing   =>
-                  assert_total $ idris_crash "Data.RRBVector.fromList.node: can't convert Nat to Fin"
-                Just cur' => T1.do
-                  set r cur' x
-                  go (S cur) n f xs r
+          let written : Nat
+              written = ixToNat pos
+          pure
+            ( f $
+                force $
+                  take written $
+                    A n res
+            , []
+            )
+        go {n} Z         {pos} f xs        r = T1.do
+          res <- unsafeFreeze r
+          pure
+            ( f $ A n res
+            , xs
+            )
+        go {n} (S k)     {pos} f (x :: xs) r =
+          let idx : Fin n
+              idx = ixToFin pos
+           in T1.do
+                set r idx x
+                assert_total (go {n} k {pos = IS pos} f xs r)
+    ||| Build internal RRB nodes from a list of child trees.
+    |||
+    ||| As with `nodes`, array positions are represented by `Ix`, eliminating
+    ||| dynamic `Nat`-to-`Fin` conversion while filling each child array.
+    |||
     nodes' :  (Array (Tree a) -> Tree a)
            -> List (Tree a)
            -> List (Tree a)
     nodes' f trees =
-      let (trees', rest) = unsafeAlloc blocksize (go 0 blocksize f trees)
-        in case rest of
-             []    =>
-               [trees']
-             rest' =>
-               (trees' :: nodes' f (assert_smaller trees rest'))
+      let (tree, rest) =
+            unsafeAlloc blocksize (go {n = blocksize} blocksize f trees)
+       in case rest of
+            [] =>
+              [tree]
+            rest' =>
+              tree :: nodes' f (assert_smaller trees rest')
       where
-        go :  (cur,n : Nat)
+        ||| Fill one internal-node child array from left to right.
+        |||
+        go :  {n : Nat}
+           -> (remaining : Nat)
+           -> {auto pos : Ix remaining n}
            -> (Array (Tree a) -> Tree a)
            -> List (Tree a)
-           -> WithMArray n (Tree a) (Tree a,List (Tree a))
-        go cur n f []        r = T1.do
+           -> WithMArray n (Tree a) (Tree a, List (Tree a))
+        go {n} remaining {pos} f []        r = T1.do
           res <- unsafeFreeze r
-          pure $ (f $ force $ take cur $ A n res,[])
-        go cur n f (x :: xs) r =
-          case cur == n of
-            True  => T1.do
-              res <- unsafeFreeze r
-              pure $ (f $ A n res, x :: xs)
-            False =>
-              case tryNatToFin cur of
-                Nothing   =>
-                  assert_total $ idris_crash "Data.RRBVector.fromList.node': can't convert Nat to Fin"
-                Just cur' => T1.do
-                  set r cur' x
-                  go (S cur) n f xs r
-    iterateNodes :  Nat
+          let written : Nat
+              written = ixToNat pos
+          pure
+            ( f $
+                force $
+                  take written $
+                    A n res
+            , []
+            )
+        go {n} Z         {pos} f xs        r = T1.do
+          res <- unsafeFreeze r
+          pure
+            ( f $ A n res
+            , xs
+            )
+        go {n} (S k)     {pos} f (x :: xs) r =
+          let idx : Fin n
+              idx = ixToFin pos
+           in T1.do
+                set r idx x
+                assert_total (go {n} k {pos = IS pos} f xs r)
+    ||| Repeatedly group child trees into balanced internal nodes until only a
+    ||| single root remains.
+    |||
+    iterateNodes :  Shift
                  -> List (Tree a)
                  -> RRBVector a
     iterateNodes sh trees =
-      case nodes' Balanced trees of
+      case nodes' (\arr => Balanced (childrenFromArray arr)) trees of
         [tree] =>
           Root (treeSize sh tree) sh tree
         trees' =>
           iterateNodes (up sh) (assert_smaller trees trees')
 
-||| Creates a vector of length n with every element set to x. O(log n)
+||| Creates a vector of length `n` with every element set to `x`. O(log n)
 |||
 export
 replicate :  Nat
@@ -157,28 +308,33 @@ replicate n x =
         EQ =>
           Root n 0 (Leaf $ A n $ fill n x)
         GT =>
-          let size' = integerToNat ((natToInteger $ minus n 1) .&. (natToInteger $ plus blockmask 1))
-            in iterateNodes blockshift
-                            (Leaf $ A blocksize $ fill blocksize x)
-                            (Leaf $ A size' $ fill size' x)
+          let size' = integerToNat $ (natToInteger $ minus n 1) .&. (natToInteger $ plus blockmask 1)
+            in iterateNodes blockshift (Leaf $ A blocksize $ fill blocksize x) (Leaf $ A size' $ fill size' x)
   where
     iterateNodes :  Shift
                  -> Tree a
                  -> Tree a
                  -> RRBVector a
     iterateNodes sh full rest =
-      let subtreesm1  = (natToInteger $ minus n 1) `shiftR` sh
-          restsize    = integerToNat (subtreesm1 .&. (natToInteger blockmask))
-          rest'       = Balanced $ A (plus restsize 1) $ append (fill restsize full) (fill 1 rest)
-        in case compare subtreesm1 (natToInteger blocksize) of
-             LT =>
-               Root n sh rest'
-             EQ =>
-               let full' = Balanced (A blocksize $ fill blocksize full)
-                 in iterateNodes (up sh) (assert_smaller full full') (assert_smaller rest rest')
-             GT =>
-               let full' = Balanced (A blocksize $ fill blocksize full)
-                 in iterateNodes (up sh) (assert_smaller full full') (assert_smaller rest rest')
+      let subtreesm1   = (natToInteger $ minus n 1) `shiftR` sh
+          restsize     = integerToNat $ subtreesm1 .&. natToInteger blockmask
+          restchildren : Children a
+          restchildren = childrenSnoc (fill restsize full) rest
+          rest'        : Tree a
+          rest'        = Balanced restchildren
+       in case compare subtreesm1 (natToInteger blocksize) of
+            LT =>
+              Root n sh rest'
+            EQ =>
+              let fullchildren : Children a
+                  fullchildren = MkChildren {n = blocksize} {nonEmpty = believe_me ()} {withinBlock = lteReflNat blocksize} (fill blocksize full)
+                  full'        = Balanced fullchildren
+                in iterateNodes (up sh) (assert_smaller full full') (assert_smaller rest rest')
+            GT =>
+              let fullchildren : Children a
+                  fullchildren = MkChildren {n = blocksize} {nonEmpty = believe_me ()} {withinBlock = lteReflNat blocksize} (fill blocksize full)
+                  full'        = Balanced fullchildren
+                in iterateNodes (up sh) (assert_smaller full full') (assert_smaller rest rest')
 
 --------------------------------------------------------------------------------
 --          Creating Lists from RRB-Vectors
