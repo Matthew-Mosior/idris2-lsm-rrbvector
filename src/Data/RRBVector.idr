@@ -345,14 +345,19 @@ replicate n x =
 export
 toList :  RRBVector a
        -> List a
-toList Empty           = []
-toList (Root _ _ tree) = treeToList tree
+toList Empty           =
+  []
+toList (Root _ _ tree) =
+  treeToList tree
   where
     treeToList :  Tree a
                -> List a
-    treeToList (Balanced trees)     = assert_total $ concat (map treeToList (toList trees))
-    treeToList (Unbalanced trees _) = assert_total $ concat (map treeToList (toList trees))
-    treeToList (Leaf arr)           = toList arr
+    treeToList (Balanced (MkChildren {n} trees))            =
+      assert_total (concat (map treeToList (toList (A n trees))))
+    treeToList (Unbalanced (MkRelaxedChildren {n} trees _)) =
+      assert_total (concat (map treeToList (toList (A n trees))))
+    treeToList (Leaf arr)                                   =
+      toList arr
 
 --------------------------------------------------------------------------------
 --          Folds
@@ -368,13 +373,18 @@ foldl f acc = go
     foldlTree :  b
               -> Tree a
               -> b
-    foldlTree acc' (Balanced arr)     = assert_total $ foldl foldlTree acc' arr
-    foldlTree acc' (Unbalanced arr _) = assert_total $ foldl foldlTree acc' arr
-    foldlTree acc' (Leaf arr)         = assert_total $ foldl f acc' arr
+    foldlTree acc' (Balanced (MkChildren {n} trees))            =
+      assert_total (foldl foldlTree acc' (A n trees))
+    foldlTree acc' (Unbalanced (MkRelaxedChildren {n} trees _)) =
+      assert_total (foldl foldlTree acc' (A n trees))
+    foldlTree acc' (Leaf arr)                                   =
+      assert_total (foldl f acc' arr)
     go :  RRBVector a
        -> b
-    go Empty           = acc
-    go (Root _ _ tree) = assert_total $ foldlTree acc tree
+    go Empty           =
+      acc
+    go (Root _ _ tree) =
+      assert_total (foldlTree acc tree)
 
 export
 foldr :  (a -> b -> b)
@@ -386,13 +396,18 @@ foldr f acc = go
     foldrTree :  Tree a
               -> b
               -> b
-    foldrTree (Balanced arr) acc'     = assert_total $ foldr foldrTree acc' arr
-    foldrTree (Unbalanced arr _) acc' = assert_total $ foldr foldrTree acc' arr
-    foldrTree (Leaf arr) acc'         = assert_total $ foldr f acc' arr
+    foldrTree (Balanced (MkChildren {n} trees))            acc' =
+      assert_total (foldr foldrTree acc' (A n trees))
+    foldrTree (Unbalanced (MkRelaxedChildren {n} trees _)) acc' =
+      assert_total (foldr foldrTree acc' (A n trees))
+    foldrTree (Leaf arr)                                   acc' =
+      assert_total (foldr f acc' arr)
     go :  RRBVector a
        -> b
-    go Empty           = acc
-    go (Root _ _ tree) = assert_total $ foldrTree tree acc
+    go Empty           =
+      acc
+    go (Root _ _ tree) =
+      assert_total (foldrTree tree acc)
 
 --------------------------------------------------------------------------------
 --          Query
@@ -418,67 +433,42 @@ length (Root s _ _) = s
 --          Indexing
 --------------------------------------------------------------------------------
 
-||| The element at the index or Nothing if the index is out of range. O(log n)
+||| The element at the index or `Nothing` if the index is out of range. O(log n)
 |||
 export
 lookup :  Nat
        -> RRBVector a
        -> Maybe a
-lookup _ Empty               = Nothing
+lookup _ Empty               =
+  Nothing
 lookup i (Root size sh tree) =
-  case compare i 0 of
-    LT =>
-      Nothing -- index out of range
-    GT =>
-      case compare i size of
-        EQ =>
-          Nothing -- index out of range
-        GT =>
-          Nothing -- index out of range
-        LT =>
-          Just $ lookupTree i sh tree
-    EQ =>
-      case compare i size of
-        EQ =>
-          Nothing -- index out of range
-        GT =>
-          Nothing -- index out of range
-        LT =>
-          Just $ lookupTree i sh tree
+  case i < size of
+    False =>
+      Nothing
+    True =>
+      Just (lookupTree i sh tree)
   where
     lookupTree :  Nat
-               -> Nat
+               -> Shift
                -> Tree a
                -> a
-    lookupTree i sh (Balanced arr)         =
-      case tryNatToFin (radixIndex i sh) of
-        Nothing =>
-          assert_total $ idris_crash "Data.RRBVector.lookup: can't convert Nat to Fin"
-        Just i' =>
-          assert_total $ lookupTree i (down sh) (at arr.arr i')
-    lookupTree i sh (Unbalanced arr sizes) =
-      let (idx, subidx) = relaxedRadixIndex sizes i sh
-        in case tryNatToFin idx of
-             Nothing   =>
-               assert_total $ idris_crash "Data.RRBVector.lookup: can't convert Nat to Fin"
-             Just idx' =>
-               assert_total $ lookupTree subidx (down sh) (at arr.arr idx')
-    lookupTree i _ (Leaf arr)              =
-      let i' = integerToNat ((natToInteger i) .&. (natToInteger blockmask))
-        in case tryNatToFin i' of
-             Nothing =>
-               assert_total $ idris_crash "Data.RRBVector.lookup: can't convert Nat to Fin"
-             Just i'' =>
-               at arr.arr i''
-
-||| The element at the index.
-||| Calls 'idris_crash' if the index is out of range. O(log n)
-|||
-export
-index :  Nat
-      -> RRBVector a
-      -> a
-index i = fromMaybe (assert_total $ idris_crash "Data.RRBVector.index: index out of range") . lookup i
+    lookupTree i sh (Balanced (MkChildren {n} children))                           =
+      let childIdx : Nat
+          childIdx = radixIndex i sh
+          0 childLT : LT childIdx n
+          childLT = believe_me ()
+          child : Fin n
+          child = natToFinLT childIdx @{childLT}
+        in assert_total (lookupTree i (down sh) (at children child))
+    lookupTree i sh (Unbalanced (MkRelaxedChildren {n} {nonEmpty} children sizes)) =
+      let MkRelaxedIndex child offset = relaxedRadixIndex {n} {nonEmpty} sizes i sh
+        in assert_total (lookupTree offset (down sh) (at children child))
+    lookupTree i _  (Leaf (A n elems))                                             =
+      let leafidx  : Nat
+          leafidx  = integerToNat ((natToInteger i) .&. natToInteger blockmask)
+          0 leafLT : LT leafidx n
+          leafLT   = believe_me ()
+        in atNat elems leafidx @{leafLT}
 
 ||| A flipped version of lookup. O(log n)
 |||
@@ -487,14 +477,6 @@ export
      -> Nat
      -> Maybe a
 (!?) = flip lookup
-
-||| A flipped version of index. O(log n)
-|||
-export
-(!!) :  RRBVector a
-     -> Nat
-     -> a
-(!!) = flip index
 
 ||| Update the element at the index with a new element.
 ||| If the index is out of range, the original vector is returned. O (log n)
