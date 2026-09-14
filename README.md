@@ -450,7 +450,6 @@ All user functions exist within the `Data.LSMRRBVector` module.
 
 - `toList`
 - `length`
-- `index`
 - `lookup`
 - `null`
 
