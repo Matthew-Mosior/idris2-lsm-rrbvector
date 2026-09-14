@@ -1032,7 +1032,7 @@ Root size sh tree |> x =
           assert_total (Balanced (MkChildren {n = S k} {nonEmpty = nonEmpty} {withinBlock = withinBlock} (updateAt lastFin (snocTree $ down sh) children)))
         EQ =>
           let children' = append children (fill 1 (newBranch x (down sh)))
-            in Balanced (MkChildren {n = S (S k)} {nonEmpty = believe_me ()} {withinBlock = believe_me ()} children')
+            in Balanced (MkChildren {n = plus (S k) 1} {nonEmpty = believe_me ()} {withinBlock = believe_me ()} children')
         GT =>
           assert_total (Balanced (MkChildren {n = S k} {nonEmpty = nonEmpty} {withinBlock = withinBlock} (updateAt lastFin (snocTree $ down sh) children)))
     snocTree sh (Unbalanced (MkRelaxedChildren {n = S k} {nonEmpty} {withinBlock} children sizes)) =
@@ -1046,13 +1046,13 @@ Root size sh tree |> x =
               lastsize  = plus (lastAt sizes) 1
               children' = append children (fill 1 (newBranch x (down sh)))
               sizes'    = append sizes (fill 1 lastsize)
-            in Unbalanced (MkRelaxedChildren {n = S (S k)} {nonEmpty = believe_me ()} {withinBlock = believe_me ()} children' sizes')
+            in Unbalanced (MkRelaxedChildren {n = plus (S k) 1} {nonEmpty = believe_me ()} {withinBlock = believe_me ()} children' sizes')
         GT =>
           let lastsize : Nat
               lastsize = plus (lastAt sizes) 1
             in assert_total (Unbalanced (MkRelaxedChildren {n = S k} {nonEmpty = nonEmpty} {withinBlock = withinBlock} (updateAt lastFin (snocTree $ down sh) children) (setAt lastFin lastsize sizes)))
     snocTree _  (Leaf arr)                                                                         =
-      Leaf (A (S arr.size) (append arr.arr (fill 1 x)))
+      Leaf (A (plus arr.size 1) (append arr.arr (fill 1 x)))
 
 ||| Concatenates two vectors. O(log(max(n1,n2)))
 |||
