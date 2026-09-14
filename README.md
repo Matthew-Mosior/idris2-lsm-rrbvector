@@ -47,10 +47,28 @@ That relaxation is what enables efficient concatenation.
 ### Top-level Structure
 
 ```idris
-data Tree a
-  = Balanced (Array (Tree a))
-  | Unbalanced (Array (Tree a)) (Array Nat)
-  | Leaf (Array a)
+data Children : Type -> Type where
+  MkChildren :  {n : Nat}
+             -> {auto 0 nonEmpty : LT 0 n}
+             -> {auto 0 withinBlock : LTE n Data.RRBVector.Internal.blocksize}
+             -> IArray n (Tree a)
+             -> Children a
+
+data RelaxedChildren : Type -> Type where
+  MkRelaxedChildren :  {n : Nat}
+                    -> {auto 0 nonEmpty : LT 0 n}
+                    -> {auto 0 withinBlock : LTE n Data.RRBVector.Internal.blocksize}
+                    -> IArray n (Tree a)
+                    -> IArray n Nat
+                    -> RelaxedChildren a
+
+data Tree : Type -> Type where
+  Balanced   :  Children a
+             -> Tree a
+  Unbalanced :  RelaxedChildren a
+             -> Tree a
+  Leaf       :  Array a
+             -> Tree a
 ```
 
 ```idris

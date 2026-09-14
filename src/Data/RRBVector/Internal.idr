@@ -6,6 +6,7 @@ import Data.Array.Core
 import Data.Array.Index
 import Data.Array.Indexed
 import Data.Bits
+import Data.Fin
 import Data.List
 import Data.Nat
 import Data.String
@@ -16,7 +17,7 @@ import Syntax.T1 as T1
 %language ElabReflection
 
 --------------------------------------------------------------------------------
---          Internal Utility
+--          Internal Utilities
 --------------------------------------------------------------------------------
 
 ||| Convenience interface for bitSize that doesn't use an implicit parameter.
@@ -26,6 +27,39 @@ bitSizeOf :  (ty : Type)
           -> FiniteBits ty
           => Nat
 bitSizeOf ty = bitSize {a = ty}
+
+||| Read the final element of a known nonempty indexed array.
+|||
+||| The bound proof is erased at runtime.
+|||
+export %inline
+lastAt :  {n : Nat}
+       -> IArray (S n) a
+       -> a
+lastAt arr =
+  atNat arr n
+
+--------------------------------------------------------------------------------
+--          RelaxedIndex
+--------------------------------------------------------------------------------
+
+||| The result of locating an element within a relaxed RRB tree node.
+|||
+||| `child` identifies the child subtree containing the requested logical
+||| element. Its `Fin count` type guarantees that the child index is valid
+||| for the corresponding node.
+|||
+||| `offset` is the element's index relative to the beginning of that child
+||| subtree.
+|||
+||| Returning the child position as a bounded index allows subsequent array
+||| access to avoid an additional `Nat`-to-`Fin` conversion.
+|||
+public export
+record RelaxedIndex (count : Nat) where
+  constructor MkRelaxedIndex
+  child : Fin count
+  offset : Nat
 
 --------------------------------------------------------------------------------
 --          Internals
@@ -69,52 +103,113 @@ radixIndex :  Nat
            -> Nat
 radixIndex i sh = integerToNat ((natToInteger i) `shiftR` sh .&. (natToInteger blockmask))
 
-export
-relaxedRadixIndex :  Array Nat
-                  -> Nat
-                  -> Shift
-                  -> (Nat, Nat)
-relaxedRadixIndex sizes i sh =
-  let guess  = radixIndex i sh -- guess <= idx
-      idx    = loop sizes guess
-      subIdx = case idx == 0 of
-                 True  =>
-                   i
-                 False =>
-                   let idx' = case tryNatToFin $ minus idx 1 of
-                                Nothing    =>
-                                  assert_total $ idris_crash "Data.RRBVector.Internal.relaxedRadixIndex: index out of bounds"
-                                Just idx'' =>
-                                  idx''
-                     in minus i (at sizes.arr idx')
-    in (idx, subIdx)
-  where
-    loop :  Array Nat
-         -> Nat
-         -> Nat
-    loop sizes idx =
-      let current = case tryNatToFin idx of
-                      Nothing       =>
-                        assert_total $ idris_crash "Data.RRBVector.Internal.relaxedRadixIndex.loop: index out of bounds"
-                      Just idx' =>
-                        at sizes.arr idx' -- idx will always be in range for a well-formed tree
-        in case i < current of
-             True  =>
-               idx
-             False =>
-               assert_total $ loop sizes (plus idx 1)
-
 --------------------------------------------------------------------------------
 --          Internal Tree Representation
 --------------------------------------------------------------------------------
 
-||| An internal tree representation.
+mutual
+
+  ||| A nonempty collection of child nodes for a balanced RRB tree node.
+  |||
+  ||| The number of children is existentially quantified by `n`.
+  |||
+  ||| The erased proofs guarantee that:
+  ||| - the node contains at least one child, and
+  ||| - the number of children does not exceed the RRB branching factor.
+  |||
+  ||| Because these invariants are carried in the type, callers can index the
+  ||| underlying `IArray` using bounded indices without repeatedly recovering
+  ||| these facts through `tryNatToFin` or other runtime bounds checks.
+  |||
+  public export
+  data Children : Type -> Type where
+    MkChildren :  {n : Nat}
+               -> {auto 0 nonEmpty : LT 0 n}
+               -> {auto 0 withinBlock : LTE n Data.RRBVector.Internal.blocksize}
+               -> IArray n (Tree a)
+               -> Children a
+
+  ||| A nonempty collection of child nodes for a relaxed RRB tree node,
+  ||| together with its cumulative size table.
+  |||
+  ||| Both arrays have the same statically tracked length `n`, which guarantees
+  ||| that every child has a corresponding cumulative-size entry.
+  |||
+  ||| The erased proofs additionally guarantee that:
+  ||| - the node contains at least one child, and
+  ||| - the number of children does not exceed the RRB branching factor.
+  |||
+  ||| Encoding these invariants directly avoids repeatedly converting raw
+  ||| `Nat` indices with `tryNatToFin` when traversing relaxed nodes.
+  |||
+  public export
+  data RelaxedChildren : Type -> Type where
+    MkRelaxedChildren :  {n : Nat}
+                      -> {auto 0 nonEmpty : LT 0 n}
+                      -> {auto 0 withinBlock : LTE n Data.RRBVector.Internal.blocksize}
+                      -> IArray n (Tree a)
+                      -> IArray n Nat
+                      -> RelaxedChildren a
+
+  ||| The internal tree representation of an RRB vector.
+  |||
+  ||| A tree node is one of:
+  ||| - `Balanced` -> containing a nonempty bounded array of child nodes whose
+  |||   positions are determined directly from the radix index.
+  ||| - `Unbalanced` -> containing a nonempty bounded array of child nodes plus
+  |||   a cumulative size table used for relaxed indexing.
+  ||| - `Leaf` -> containing the actual vector elements.
+  |||
+  ||| Internal-node invariants such as nonemptiness, maximum branching factor,
+  ||| and matching child/size-table lengths are encoded by `Children` and
+  ||| `RelaxedChildren`. This allows traversal code to work with bounded indices
+  ||| directly rather than repeatedly recovering those invariants at runtime.
+  |||
+  public export
+  data Tree : Type -> Type where
+    Balanced   :  Children a
+               -> Tree a
+    Unbalanced :  RelaxedChildren a
+               -> Tree a
+    Leaf       :  Array a
+               -> Tree a
+
+--------------------------------------------------------------------------------
+--          Children and RelaxedChildren
+--------------------------------------------------------------------------------
+
+||| Convert a bounded collection of balanced-node children back to the
+||| existential `Array` representation.
 |||
-public export
-data Tree a
-  = Balanced (Array (Tree a))
-  | Unbalanced (Array (Tree a)) (Array Nat)
-  | Leaf (Array a)
+||| This is primarily useful for APIs and utility functions that do not need
+||| to retain the child-count index in their result type.
+|||
+export %inline
+childrenToArray :  Children a
+                -> Array (Tree a)
+childrenToArray (MkChildren {n} arr) =
+  A n arr
+
+||| Convert the child array of a relaxed node back to the existential
+||| `Array` representation.
+|||
+||| The corresponding size table has the same statically tracked length, but
+||| is intentionally discarded by this projection.
+|||
+export %inline
+relaxedChildrenToArray :  RelaxedChildren a
+                       -> Array (Tree a)
+relaxedChildrenToArray (MkRelaxedChildren {n} children _) =
+  A n children
+
+||| Convert the cumulative size table of a relaxed node back to the
+||| existential `Array` representation.
+|||
+export %inline
+relaxedSizesToArray :  RelaxedChildren a
+                    -> Array Nat
+relaxedSizesToArray (MkRelaxedChildren {n} _ sizes) =
+  A n sizes
 
 --------------------------------------------------------------------------------
 --          Query (Tree)
@@ -125,11 +220,11 @@ data Tree a
 private
 null :  Tree a
      -> Bool
-null (Balanced arr)     =
-  null arr
-null (Unbalanced arr _) =
-  null arr
-null (Leaf arr)         =
+null (Balanced _)   =
+  False
+null (Unbalanced _) =
+  False
+null (Leaf arr)     =
   null arr
 
 --------------------------------------------------------------------------------
@@ -147,12 +242,12 @@ foldl f acc tree =
     foldlTree :  b
               -> Tree a
               -> b
-    foldlTree acc' (Balanced arr)     =
-      assert_total $ foldl foldlTree acc' arr
-    foldlTree acc' (Unbalanced arr _) =
-      assert_total $ foldl foldlTree acc' arr
-    foldlTree acc' (Leaf arr)         =
-      assert_total $ foldl f acc' arr
+    foldlTree acc' (Balanced (MkChildren {n} arr))            =
+      assert_total (foldl foldlTree acc' (A n arr))
+    foldlTree acc' (Unbalanced (MkRelaxedChildren {n} arr _)) =
+      assert_total (foldl foldlTree acc' (A n arr))
+    foldlTree acc' (Leaf arr)                                 =
+      assert_total (foldl f acc' arr)
 
 private
 foldr :  (a -> b -> b)
@@ -165,12 +260,12 @@ foldr f acc tree =
     foldrTree :  Tree a
               -> b
               -> b
-    foldrTree (Balanced arr) acc'     =
-      assert_total $ foldr foldrTree acc' arr
-    foldrTree (Unbalanced arr _) acc' =
-      assert_total $ foldr foldrTree acc' arr
-    foldrTree (Leaf arr) acc'         =
-      assert_total $ foldr f acc' arr
+    foldrTree (Balanced (MkChildren {n} arr)) acc'            =
+      assert_total (foldr foldrTree acc' (A n arr))
+    foldrTree (Unbalanced (MkRelaxedChildren {n} arr _)) acc' =
+      assert_total (foldr foldrTree acc' (A n arr))
+    foldrTree (Leaf arr) acc'                                 =
+      assert_total (foldr f acc' arr)
 
 --------------------------------------------------------------------------------
 --          Creating Lists from Trees
@@ -179,11 +274,11 @@ foldr f acc tree =
 export
 toList :  Tree a
        -> List a
-toList (Balanced arr)     =
-  assert_total $ concat (map toList (toList arr))
-toList (Unbalanced arr _) =
-  assert_total $ concat (map toList (toList arr))
-toList (Leaf arr)         =
+toList (Balanced (MkChildren {n} arr))            =
+  assert_total (concat $ map toList $ toList (A n arr))
+toList (Unbalanced (MkRelaxedChildren {n} arr _)) =
+  assert_total (concat $ map toList $ toList (A n arr))
+toList (Leaf arr)                                 =
   toList arr
 
 --------------------------------------------------------------------------------
@@ -192,11 +287,11 @@ toList (Leaf arr)         =
 
 public export
 Show a => Show (Tree a) where
-  show (Balanced arr)     =
-    assert_total $ "Balanced " ++ show arr
-  show (Unbalanced arr _) =
-    assert_total $ "Unbalanced " ++ show arr
-  show (Leaf arr)         =
+  show (Balanced children)   =
+    assert_total ("Balanced " ++ show (childrenToArray children))
+  show (Unbalanced children) =
+    assert_total ("Unbalanced " ++ show (relaxedChildrenToArray children))
+  show (Leaf arr)            =
     "Leaf " ++ show arr
 
 public export
@@ -208,13 +303,13 @@ Foldable Tree where
 
 public export
 Eq a => Eq (Tree a) where
-  (Balanced arr1) == (Balanced arr2)         =
-    assert_total $ arr1 == arr2
-  (Unbalanced arr1 _) == (Unbalanced arr2 _) =
-    assert_total $ arr1 == arr2
-  (Leaf arr1) == (Leaf arr2)                 =
-    arr1 == arr2
-  _                        == _              =
+  Balanced xs == Balanced ys     =
+    assert_total (childrenToArray xs == childrenToArray ys)
+  Unbalanced xs == Unbalanced ys =
+    assert_total (relaxedChildrenToArray xs == relaxedChildrenToArray ys)
+  Leaf xs == Leaf ys             =
+    xs == ys
+  _ == _                         =
     False
 
 public export
@@ -231,12 +326,12 @@ showTreeRep :  Show a
             => Show (Tree a)
             => Tree a
             -> String
-showTreeRep (Balanced trees)     =
-  assert_total $ "Balanced " ++ (show $ toList trees)
-showTreeRep (Unbalanced trees _) =
-  assert_total $ "Unbalanced " ++ (show $ toList trees)
-showTreeRep (Leaf elems)         =
-  assert_total $ "Leaf " ++ (show $ toList elems)
+showTreeRep (Balanced children)   =
+  assert_total ("Balanced " ++ show (toList $ childrenToArray children))
+showTreeRep (Unbalanced children) =
+  assert_total ("Unbalanced " ++ show (toList $ relaxedChildrenToArray children))
+showTreeRep (Leaf elems)          =
+  assert_total ("Leaf " ++ show (toList elems))
 
 --------------------------------------------------------------------------------
 --          Tree Utilities
@@ -251,21 +346,21 @@ singleton x =
 export
 treeToArray :  Tree a
             -> Array (Tree a)
-treeToArray (Balanced arr)     =
-  arr
-treeToArray (Unbalanced arr _) =
-  arr
-treeToArray (Leaf _)           =
-  assert_total $ idris_crash "Data.RRBVector.Internal.treeToArray: leaf"
+treeToArray (Balanced children)   =
+  childrenToArray children
+treeToArray (Unbalanced children) =
+  relaxedChildrenToArray children
+treeToArray (Leaf _)              =
+  assert_total (idris_crash "Data.RRBVector.Internal.treeToArray: leaf")
 
 export
 treeBalanced :  Tree a
              -> Bool
-treeBalanced (Balanced _)     =
+treeBalanced (Balanced _)   =
   True
-treeBalanced (Unbalanced _ _) =
+treeBalanced (Unbalanced _) =
   False
-treeBalanced (Leaf _)         =
+treeBalanced (Leaf _)       =
   True
 
 ||| Computes the size of a tree with shift.
@@ -274,138 +369,235 @@ export
 treeSize :  Shift
          -> Tree a
          -> Nat
-treeSize = go 0
+treeSize =
+  go 0
   where
     go :  Shift
        -> Shift
        -> Tree a
        -> Nat
-    go acc _  (Leaf arr)             =
+    go acc _ (Leaf arr)                                         =
       plus acc arr.size
-    go acc _  (Unbalanced arr sizes) =
-      let i = case tryNatToFin $ minus arr.size 1 of
-                Nothing =>
-                  assert_total $ idris_crash "Data.RRBVector.Internal.treeSize: index out of bounds"
-                Just i' =>
-                  i'
-        in plus acc (at sizes.arr i)
-    go acc sh (Balanced arr)         =
-      let i  = minus arr.size 1
-          i' = case tryNatToFin i of
-                 Nothing  =>
-                   assert_total $ idris_crash "Data.RRBVector.Internal.treeSize: index out of bounds"
-                 Just i'' =>
-                   i''
-        in go (plus acc (mult i (integerToNat (1 `shiftL` sh))))
-              (down sh)
-              (assert_smaller arr (at arr.arr i'))
+    go acc _ (Unbalanced (MkRelaxedChildren {n = S k} _ sizes)) =
+      plus acc (lastAt sizes)
+    go acc sh (Balanced (MkChildren {n = S k} children))        =
+      let subtreeSize : Nat
+          subtreeSize = integerToNat (1 `shiftL` sh)
+          acc'        : Nat
+          acc'        = plus acc (mult k subtreeSize)
+          child       : Tree a
+          child       = lastAt children
+       in go acc' (down sh) (assert_smaller children child)
 
-||| Turns an array into a tree node by computing the sizes of its subtrees.
-||| sh is the shift of the resulting tree.
+
+||| Locate the child subtree containing a logical index in a relaxed node.
+|||
+||| The size table contains cumulative subtree sizes and has exactly `n`
+||| entries, one for each child in the corresponding relaxed node.
+|||
+||| The radix-derived initial guess is a lower bound on the actual child
+||| position. The search advances through the cumulative size table until it
+||| finds the first entry greater than `i`.
+|||
+||| The returned `RelaxedIndex` carries the selected child as `Fin n`, so the
+||| caller can index the corresponding child array directly without performing
+||| another `Nat`-to-`Fin` conversion.
+|||
+||| For a well-formed relaxed node and a logical index belonging to that node:
+||| - the initial radix guess is strictly smaller than the number of children
+||| - whenever the current cumulative size does not contain `i`, another size
+|||   entry exists.
+|||
+||| These structural invariants are supplied as erased proofs and therefore
+||| introduce no runtime bounds checks.
+|||
+export
+relaxedRadixIndex :  {n : Nat}
+                  -> {auto 0 nonEmpty : LT 0 n}
+                  -> IArray n Nat
+                  -> Nat
+                  -> Shift
+                  -> RelaxedIndex n
+relaxedRadixIndex {n = Z} {nonEmpty} sizes i sh impossible
+relaxedRadixIndex {n = S k} sizes i sh =
+  let guess     : Nat
+      guess     = radixIndex i sh
+      0 guessLT : LT guess (S k)
+      guessLT   = believe_me ()
+      child     : Fin (S k)
+      child     = natToFinLT guess @{guessLT}
+    in assert_total (loop child)
+  where
+    ||| Compute the logical index relative to the selected child.
+    |||
+    ||| For the first child, the logical index is already relative to that
+    ||| child. For later children, the cumulative size of the preceding child
+    ||| is subtracted from the logical index.
+    |||
+    childOffset :  Fin (S k)
+                -> Nat
+    childOffset FZ =
+      i
+    childOffset (FS previous) =
+      minus i (at sizes (weaken previous))
+    ||| Search forward through the cumulative size table for the first child
+    ||| whose cumulative size is greater than the requested logical index.
+    |||
+    ||| The search itself carries a bounded `Fin (S k)` child index, so reading
+    ||| the size table requires no runtime `Nat`-to-`Fin` conversion.
+    |||
+    loop :  Fin (S k)
+         -> RelaxedIndex (S k)
+    loop child =
+      let current : Nat
+          current = at sizes child
+       in case i < current of
+            True  =>
+              MkRelaxedIndex child (childOffset child)
+            False =>
+              let next      : Nat
+                  next      = S (finToNat child)
+                  0 nextLT  : LT next (S k)
+                  nextLT    = believe_me ()
+                  nextchild : Fin (S k)
+                  nextchild = natToFinLT next @{nextLT}
+                in assert_total (loop nextchild)
+
+||| Turns a valid collection of child nodes into an internal tree node.
+|||
+||| If every non-final child is a full subtree and the final child is
+||| balanced, the resulting node is represented as `Balanced`.
+|||
+||| Otherwise, a cumulative size table with exactly the same statically
+||| tracked length as the child array is constructed and the node is
+||| represented as `Unbalanced`.
 |||
 export
 computeSizes :  Shift
-             -> Array (Tree a)
+             -> Children a
              -> Tree a
-computeSizes sh arr =
-  case isBalanced of
-    True  =>
-      Balanced arr
+computeSizes sh children@(MkChildren {n} {nonEmpty} {withinBlock} trees) =
+  case isBalanced n of
+    True =>
+      Balanced children
     False =>
-      let arrnat = unsafeAlloc arr.size (loop sh 0 0 arr.size (toList arr))
-        in Unbalanced arr arrnat
+      let sizes : IArray n Nat
+          sizes = unsafeAlloc n (loop n 0)
+        in Unbalanced (MkRelaxedChildren {nonEmpty = nonEmpty} {withinBlock = withinBlock} trees sizes)
   where
-    loop :  (sh,cur,acc,n : Nat)
-         -> List (Tree a)
-         -> WithMArray n Nat (Array Nat)
-    loop sh _   acc n []        r = T1.do
-      res <- unsafeFreeze r
-      pure $ A n res
-    loop sh cur acc n (x :: xs) r =
-      case tryNatToFin cur of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.Internal.computeSizes.go: can't convert Nat to Fin"
-        Just cur' =>
-          let acc' = plus acc (treeSize (down sh) x)
-            in T1.do set r cur' acc'
-                     assert_total $ loop sh (S cur) acc' n xs r
+    ||| Fill the cumulative subtree-size table from left to right.
+    |||
+    ||| `Ix remaining n` carries the current valid array position, avoiding
+    ||| any dynamic `Nat`-to-`Fin` conversion.
+    |||
+    loop :  (remaining : Nat)
+         -> {auto pos : Ix remaining n}
+         -> Nat
+         -> WithMArray n Nat (IArray n Nat)
+    loop Z acc r = T1.do
+      unsafeFreeze r
+    loop (S k) {pos} acc r =
+      let subtree : Tree a
+          subtree = ix trees k
+          acc'    : Nat
+          acc'    = plus acc (treeSize (down sh) subtree)
+          dst     : Fin n
+          dst     = ixToFin pos
+       in T1.do
+            set r dst acc'
+            assert_total $ loop k acc' r
+    ||| Maximum logical size of a full child subtree at this level.
+    |||
     maxsize : Integer
-    maxsize = 1 `shiftL` sh -- the maximum size of a subtree
-    len : Nat
-    len = arr.size
-    lenM1 : Nat
-    lenM1 = minus len 1
-    isBalanced : Bool
-    isBalanced = go 0
-      where
-        go :  Nat
-           -> Bool
-        go i =
-          let subtree = case tryNatToFin i of
-                          Nothing =>
-                            assert_total $ idris_crash "Data.RRBVector.Internal.computeSizes.isBalanced: can't convert Nat to Fin"
-                          Just i' =>
-                            at arr.arr i'
-            in case i < lenM1 of
-                 True  =>
-                   assert_total $ (natToInteger $ treeSize (down sh) subtree) == maxsize && go (plus i 1)
-                 False =>
-                   treeBalanced subtree
+    maxsize = 1 `shiftL` sh
+    ||| Determine whether the children can use the compact balanced-node
+    ||| representation.
+    |||
+    isBalanced :  (remaining : Nat)
+               -> {auto pos : Ix remaining n}
+               -> Bool
+    isBalanced Z     =
+      True
+    isBalanced (S Z) =
+      treeBalanced (ix trees Z)
+    isBalanced (S (S k)) =
+      let subtree : Tree a
+          subtree = ix trees (S k)
+       in assert_total ((natToInteger $ treeSize (down sh) subtree) == maxsize && isBalanced (S k))
 
+||| Count the number of consecutive zero bits beginning at the least
+||| significant bit of a natural number.
+|||
+||| Bit positions are traversed from least significant to most significant.
+||| The `Ix` witness carries the current valid bit position within the fixed
+||| width of `Int`, so no `tryNatToFin` conversion is required.
+|||
+||| If no set bit is found, the full bit width of `Int` is returned.
+|||
 export
 countTrailingZeros :  Nat
                    -> Nat
 countTrailingZeros x =
-  go 0
+  go (bitSizeOf Int)
   where
-    w : Nat
-    w = bitSizeOf Int
-    go : Nat -> Nat
-    go i =
-      case i >= w of
-        True  =>
-          i
-        False =>
-          case tryNatToFin i of
-            Nothing =>
-              assert_total $ idris_crash "Data.RRBVector.Internal.countTrailingZeros: can't convert Nat to Fin"
-            Just i' =>
-              case testBit (the Int (cast x)) i' of
-                True  =>
-                  i
-                False =>
-                  assert_total $ go (plus i 1)
+    value : Int
+    value = cast x
+    ||| Scan bit positions from least significant to most significant.
+    |||
+    go :  (remaining : Nat)
+       -> {auto pos : Ix remaining (bitSizeOf Int)}
+       -> Nat
+    go Z           =
+      bitSizeOf Int
+    go (S k) {pos} =
+      let bit : Fin (bitSizeOf Int)
+          bit = ixToFin pos
+       in case testBit value bit of
+            True  =>
+              finToNat bit
+            False =>
+              assert_total (go k)
 
-||| Nat log base 2.
+||| Compute the base-2 logarithm of a natural number, rounded down.
+|||
+||| The implementation scans the fixed-width `Int` representation from the
+||| most significant bit toward the least significant bit and returns the
+||| position of the first set bit.
+|||
+||| The recursive `LTE remaining (bitSizeOf Int)` proof guarantees that every
+||| tested bit position is valid. The proof is erased, and conversion to
+||| `Fin (bitSizeOf Int)` therefore requires no dynamic `Nat`-to-`Fin`
+||| bounds check.
+|||
+||| `log2 0` is defined as `0`.
 |||
 export
 log2 :  Nat
      -> Nat
 log2 x =
-  let bitSizeMinus1 = minus (bitSizeOf Int) 1
-    in minus bitSizeMinus1 (countLeadingZeros x)
+  go (bitSizeOf Int)
   where
-    countLeadingZeros : Nat -> Nat
-    countLeadingZeros x =
-      minus (minus w 1) (go (minus w 1))
-      where
-        w : Nat
-        w = bitSizeOf Int
-        go : Nat -> Nat
-        go i =
-          case i < 0 of
+    value : Int
+    value = cast x
+    ||| Scan bit positions from most significant to least significant.
+    |||
+    ||| In the `S k` case, `valid` has type
+    ||| `LTE (S k) (bitSizeOf Int)`, which is definitionally the proof
+    ||| required for `LT k (bitSizeOf Int)`.
+    |||
+    go :  (remaining : Nat)
+       -> {auto 0 valid : LTE remaining (bitSizeOf Int)}
+       -> Nat
+    go Z =
+      Z
+    go (S k) {valid} =
+      let bit : Fin (bitSizeOf Int)
+          bit = natToFinLT k @{valid}
+       in case testBit value bit of
             True  =>
-              i
+              k
             False =>
-              case tryNatToFin i of
-                Nothing =>
-                  assert_total $ idris_crash "Data.RRBVector.Internal.log2: can't convert Nat to Fin"
-                Just i' =>
-                  case testBit (the Int (cast x)) i' of
-                    True  =>
-                      i
-                    False =>
-                      assert_total $ go (minus i 1)
+              assert_total (go k {valid = lteSuccLeft valid})
 
 --------------------------------------------------------------------------------
 --          RRB Vectors
