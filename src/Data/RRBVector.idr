@@ -944,26 +944,33 @@ export
 (|>) :  RRBVector a
      -> a
      -> RRBVector a
-Empty             |> x = singleton x
+Empty |> x =
+  singleton x
 Root size sh tree |> x =
   case compare insertshift sh of
     LT =>
-      Root (plus size 1) sh (snocTree sh tree)
+      Root (S size) sh (snocTree sh tree)
     EQ =>
-      Root (plus size 1) sh (snocTree sh tree)
+      Root (S size) sh (snocTree sh tree)
     GT =>
-      let new = A 2 $ array $ fromList [tree,(newBranch x sh)]
-        in Root (plus size 1) insertshift (computeSizes insertshift new)
+      let children     : IArray 2 (Tree a)
+          children     = array ( fromList
+                                   [ tree
+                                   , newBranch x sh
+                                   ]
+                               )
+          rootChildren : Children a
+          rootChildren = MkChildren {n = 2} {nonEmpty = believe_me ()} {withinBlock = believe_me ()} children
+        in Root (S size) insertshift (computeSizes insertshift rootChildren)
   where
-    -- compute the shift at which the new branch needs to be inserted (0 means there is space in the leaf)
-    -- the size is computed for efficient calculation of the shift in a balanced subtree
+    ||| Compute the shift at which the new right-hand branch must be inserted.
+    |||
     computeShift :  Nat
-                 -> Nat
-                 -> Nat
+                 -> Shift
+                 -> Shift
                  -> Tree a
-                 -> Nat
-    computeShift sz sh min (Balanced _)          =
-      -- @sz - 1@ is the index of the last element
+                 -> Shift
+    computeShift sz sh min (Balanced _)                                                  =
       let newshift = mult (countTrailingZeros sz `div` blockshift) blockshift
         in case compare newshift sh of
              LT =>
@@ -972,31 +979,41 @@ Root size sh tree |> x =
                newshift
              GT =>
                min
-    computeShift _ sh min (Unbalanced arr sizes) =
-      let lastidx = minus arr.size 1
-          sz'     = case tryNatToFin lastidx of
-                      Nothing       =>
-                        assert_total $ idris_crash "Data.RRBVector.(|>).computeShift.Unbalanced: can't convert Nat to Fin"
-                      Just lastidx' =>
-                        case tryNatToFin $ minus lastidx 1 of
-                          Nothing        =>
-                            assert_total $ idris_crash "Data.RRBVector.(|>).computeShift.Unbalanced: can't convert Nat to Fin"
-                          Just lastidx'' =>
-                            minus (at sizes.arr lastidx') (at sizes.arr lastidx'')
-          newtree = case tryNatToFin lastidx of
-                      Nothing       =>
-                        assert_total $ idris_crash "Data.RRBVector.(|>).computeShift.Unbalanced: can't convert Nat to Fin"
-                      Just lastidx' =>
-                        at arr.arr lastidx'
-          newmin  = case compare arr.size blocksize of
-                      LT =>
-                        sh
-                      EQ =>
-                        min
-                      GT =>
-                        min
-        in assert_total $ computeShift sz' (down sh) newmin newtree
-    computeShift _ _ min (Leaf arr)              =
+    computeShift _  sh min (Unbalanced (MkRelaxedChildren {n = 1} children sizes))       =
+      let sz' : Nat
+          sz' = lastAt sizes
+          newtree : Tree a
+          newtree = lastAt children
+          newmin : Shift
+          newmin = case compare 1 blocksize of
+                     LT =>
+                       sh
+                     EQ =>
+                       min
+                     GT =>
+                       min
+        in assert_total (computeShift sz' (down sh) newmin newtree)
+    computeShift _  sh min (Unbalanced (MkRelaxedChildren {n = S (S k)} children sizes)) =
+      let totalsize   : Nat
+          totalsize   = lastAt sizes
+          previousidx : Fin (S (S k))
+          previousidx = weaken (lastFin {n = k})
+          previous    : Nat
+          previous    = at sizes previousidx
+          sz'         : Nat
+          sz'         = minus totalsize previous
+          newtree     : Tree a
+          newtree     = lastAt children
+          newmin      : Shift
+          newmin      = case compare (S (S k)) blocksize of
+                          LT =>
+                            sh
+                          EQ =>
+                            min
+                          GT =>
+                            min
+        in assert_total (computeShift sz' (down sh) newmin newtree)
+    computeShift _  _  min (Leaf arr)                                                    =
       case compare arr.size blocksize of
         LT =>
           0
@@ -1004,62 +1021,38 @@ Root size sh tree |> x =
           min
         GT =>
           min
-    insertshift : Nat
+    insertshift : Shift
     insertshift = computeShift size sh (up sh) tree
-    snocTree :  Nat
+    snocTree :  Shift
              -> Tree a
              -> Tree a
-    snocTree sh (Balanced arr) =
+    snocTree sh (Balanced (MkChildren {n = S k} {nonEmpty} {withinBlock} children))                =
       case compare sh insertshift of
         LT =>
-          case tryNatToFin $ minus arr.size 1 of
-            Nothing   =>
-              assert_total $ idris_crash "Data.RRBVector.(|>).snocTree.Balanced: can't convert Nat to Fin"
-            Just lastidx =>
-              assert_total $ Balanced (A arr.size $ updateAt lastidx (snocTree (down sh)) arr.arr)
+          assert_total (Balanced (MkChildren {n = S k} {nonEmpty = nonEmpty} {withinBlock = withinBlock} (updateAt lastFin (snocTree $ down sh) children)))
         EQ =>
-          Balanced (A (plus arr.size 1) (append arr.arr (fill 1 (newBranch x (down sh))))) -- the current subtree is fully balanced
+          let children' = append children (fill 1 (newBranch x (down sh)))
+            in Balanced (MkChildren {n = S (S k)} {nonEmpty = believe_me ()} {withinBlock = believe_me ()} children')
         GT =>
-          case tryNatToFin $ minus arr.size 1 of
-            Nothing   =>
-              assert_total $ idris_crash "Data.RRBVector.(|>).snocTree.Balanced: can't convert Nat to Fin"
-            Just lastidx =>
-              assert_total $ Balanced (A arr.size $ updateAt lastidx (snocTree (down sh)) arr.arr)
-    snocTree sh (Unbalanced arr sizes) =
+          assert_total (Balanced (MkChildren {n = S k} {nonEmpty = nonEmpty} {withinBlock = withinBlock} (updateAt lastFin (snocTree $ down sh) children)))
+    snocTree sh (Unbalanced (MkRelaxedChildren {n = S k} {nonEmpty} {withinBlock} children sizes)) =
       case compare sh insertshift of
         LT =>
-          case tryNatToFin $ minus arr.size 1 of
-            Nothing       =>
-              assert_total $ idris_crash "Data.RRBVector.(|>).snocTree.Unbalanced: can't convert Nat to Fin"
-            Just lastidxa =>
-              case tryNatToFin $ minus sizes.size 1 of
-                Nothing       =>
-                  assert_total $ idris_crash "Data.RRBVector.(|>).snocTree.Unbalanced: can't convert Nat to Fin"
-                Just lastidxs =>
-                  let lastsize = plus (at sizes.arr lastidxs) 1
-                    in assert_total $ Unbalanced (A arr.size (updateAt lastidxa (snocTree (down sh)) arr.arr))
-                                                 (A sizes.size (setAt lastidxs lastsize sizes.arr))
+          let lastsize : Nat
+              lastsize = plus (lastAt sizes) 1
+            in assert_total (Unbalanced (MkRelaxedChildren {n = S k} {nonEmpty = nonEmpty} {withinBlock = withinBlock} (updateAt lastFin (snocTree $ down sh) children) (setAt lastFin lastsize sizes)))
         EQ =>
-          case tryNatToFin $ minus sizes.size 1 of
-            Nothing      =>
-              assert_total $ idris_crash "Data.RRBVector.(|>).snocTree.Unbalanced: can't convert Nat to Fin"
-            Just lastidx =>
-              let lastsize = plus (at sizes.arr lastidx) 1
-                in assert_total $ Unbalanced (A (plus arr.size 1) (append arr.arr (fill 1 (newBranch x (down sh)))))
-                                             (A (plus sizes.size 1) (append sizes.arr (fill 1 lastsize)))
+          let lastsize  : Nat
+              lastsize  = plus (lastAt sizes) 1
+              children' = append children (fill 1 (newBranch x (down sh)))
+              sizes'    = append sizes (fill 1 lastsize)
+            in Unbalanced (MkRelaxedChildren {n = S (S k)} {nonEmpty = believe_me ()} {withinBlock = believe_me ()} children' sizes')
         GT =>
-          case tryNatToFin $ minus arr.size 1 of
-            Nothing       =>
-              assert_total $ idris_crash "Data.RRBVector.(|>).snocTree.Unbalanced: can't convert Nat to Fin"
-            Just lastidxa =>
-              case tryNatToFin $ minus sizes.size 1 of
-                Nothing       =>
-                  assert_total $ idris_crash "Data.RRBVector.(|>).snocTree.Unbalanced: can't convert Nat to Fin"
-                Just lastidxs =>
-                  let lastsize = plus (at sizes.arr lastidxs) 1
-                    in assert_total $ Unbalanced (A arr.size (updateAt lastidxa (snocTree (down sh)) arr.arr))
-                                                 (A sizes.size (setAt lastidxs lastsize sizes.arr))
-    snocTree _ (Leaf arr) = Leaf (A (plus arr.size 1) (append arr.arr (fill 1 x)))
+          let lastsize : Nat
+              lastsize = plus (lastAt sizes) 1
+            in assert_total (Unbalanced (MkRelaxedChildren {n = S k} {nonEmpty = nonEmpty} {withinBlock = withinBlock} (updateAt lastFin (snocTree $ down sh) children) (setAt lastFin lastsize sizes)))
+    snocTree _  (Leaf arr)                                                                         =
+      Leaf (A (S arr.size) (append arr.arr (fill 1 x)))
 
 ||| Concatenates two vectors. O(log(max(n1,n2)))
 |||
