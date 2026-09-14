@@ -175,32 +175,6 @@ length :  LSMRRBVector World a
 length lsmrrbvector tid =
   readSnapshotWithGeneration lsmrrbvector tid (\(_, v) => Data.RRBVector.length v)
 
-||| Returns the element at a given index.
-|||
-||| Behavior:
-||| - Reads the current immutable snapshot.
-||| - Retrieves the element at the specified index.
-|||
-||| Properties:
-||| - Observes a consistent snapshot.
-||| - Does not block writers or rebuild activity.
-||| - Reader participation is cleaned up automatically.
-|||
-||| Notes:
-||| - Out-of-bounds behavior matches RRBVector.index.
-||| - Concurrent writes published after acquisition are not visible.
-|||
-||| Complexity:
-||| - O(log n)
-|||
-export
-index :  LSMRRBVector World a
-      -> ThreadId
-      -> Nat
-      -> IO a
-index lsmrrbvector tid i =
-  readSnapshotWithGeneration lsmrrbvector tid (\(_, v) => Data.RRBVector.index i v)
-
 ||| Looks up an element by index.
 |||
 ||| Behavior:

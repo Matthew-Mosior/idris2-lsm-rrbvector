@@ -576,63 +576,108 @@ normalize (Root size sh (Unbalanced (MkRelaxedChildren {n = 1} children _))) =
 normalize v =
   v
 
-||| The initial i is n - 1 (the index of the last element in the new tree).
+||| Retain the portion of a tree ending at logical index `i`.
+|||
+||| `i` is the index of the final element retained in the resulting tree.
+|||
+||| Internal child positions are derived from the RRB indexing rules and
+||| represented with erased bounds proofs. No dynamic `Nat`-to-`Fin`
+||| conversion is required.
 |||
 private
 takeTree :  Nat
          -> Shift
          -> Tree a
          -> Tree a
-takeTree i sh (Balanced arr) with (radixIndex i sh) | ((plus (radixIndex i sh) 1) <= arr.size) proof eq
-  _ | i' | True  =
-    case tryNatToFin i' of
-      Nothing =>
-        assert_total $ idris_crash "Data.RRBVector.takeTree: can't convert Nat to Fin"
-      Just i'' =>
-        let newarr = force $ take (plus (radixIndex i sh) 1) arr.arr @{lteOpReflectsLTE _ _ eq}
-          in assert_total $ Balanced (A (plus (radixIndex i sh) 1) (updateAt i'' (takeTree i (down sh)) newarr))
-  _ | _  | False =
-    assert_total $ idris_crash "Data.RRBVector.takeTree: index out of bounds"
-takeTree i sh (Unbalanced arr sizes) with (relaxedRadixIndex sizes i sh) | ((plus (fst (relaxedRadixIndex sizes i sh)) 1) <= arr.size) proof eq
-  _ | (idx, subidx) | True  =
-    case tryNatToFin idx of
-      Nothing   =>
-        assert_total $ idris_crash "Data.RRBVector.takeTree: can't convert Nat to Fin"
-      Just idx' =>
-        let newarr = force $ take (plus (fst (relaxedRadixIndex sizes i sh)) 1) arr.arr @{lteOpReflectsLTE _ _ eq}
-          in assert_total $ computeSizes sh (A (plus (fst (relaxedRadixIndex sizes i sh)) 1) (updateAt idx' (takeTree subidx (down sh)) newarr))
-  _ | _             | False =
-    assert_total $ idris_crash "Data.RRBVector.takeTree: index out of bounds"
-takeTree i _ (Leaf arr) with (integerToNat (((natToInteger i) .&. (natToInteger blockmask)) + 1) <= arr.size) proof eq
-  _ | True  =
-    let newarr = force $ take (integerToNat (((natToInteger i) .&. (natToInteger blockmask)) + 1)) arr.arr @{lteOpReflectsLTE _ _ eq}
-      in Leaf (A (integerToNat (((natToInteger i) .&. (natToInteger blockmask)) + 1)) newarr)
-  _ | False =
-    assert_total $ idris_crash "Data.RRBVector.takeTree: index out of bounds"
+takeTree i sh (Balanced (MkChildren {n} children))                           =
+  let childidx  : Nat
+      childidx  = radixIndex i sh
+      0 childLT : LT childidx n
+      childLT   = believe_me ()
+      prefix'   : IArray (S childidx) (Tree a)
+      prefix'   = force (take (S childidx) children @{childLT})
+      prefix''  : IArray (S childidx) (Tree a)
+      prefix''  = updateAt (lastFin {n = childidx}) (takeTree i (down sh)) prefix'
+    in assert_total (Balanced (MkChildren {n = S childidx} {nonEmpty = LTESucc LTEZero} {withinBlock = believe_me ()} prefix''))
+takeTree i sh (Unbalanced (MkRelaxedChildren {n} {nonEmpty} children sizes)) =
+  let MkRelaxedIndex child subidx = relaxedRadixIndex {n} {nonEmpty} sizes i sh
+      childidx    : Nat
+      childidx    = finToNat child
+      0 prefixLTE : LTE (S childidx) n
+      prefixLTE   = believe_me ()
+      prefix'     : IArray (S childidx) (Tree a)
+      prefix'     = force (take (S childidx) children @{prefixLTE})
+      prefix''    : IArray (S childidx) (Tree a)
+      prefix''    = updateAt (lastFin {n = childidx}) (takeTree subidx (down sh)) prefix'
+      bounded     : Children a
+      bounded     = MkChildren {n = S childidx} {nonEmpty = LTESucc LTEZero} {withinBlock = believe_me ()} prefix''
+    in assert_total (computeSizes sh bounded)
+takeTree i _  (Leaf (A n elems))                                             =
+  let leafidx    : Nat
+      leafidx    = integerToNat ((natToInteger i) .&. natToInteger blockmask)
+      count      : Nat
+      count      = S leafidx
+      0 countLTE : LTE count n
+      countLTE   = believe_me ()
+      elems'     : IArray count a
+      elems'     = force (take count elems @{countLTE})
+    in Leaf (A count elems')
 
+||| Remove the first `n` logical elements from a tree.
+|||
+||| The selected child becomes the first child in the resulting node and is
+||| recursively trimmed by the offset within that child.
+|||
+||| Since this function is called only when elements remain after the drop,
+||| every resulting internal node is nonempty. Array positions therefore use
+||| erased bounds evidence rather than dynamic `Nat`-to-`Fin` conversion.
+|||
 private
 dropTree :  Nat
          -> Shift
          -> Tree a
          -> Tree a
-dropTree n sh (Balanced arr) =
-  case tryNatToFin 0 of
-    Nothing   =>
-      assert_total $ idris_crash "Data.RRBVector.dropTree: can't convert Nat to Fin"
-    Just zero =>
-      let newarr = force $ drop (radixIndex n sh) arr.arr
-        in assert_total $ computeSizes sh (A (minus arr.size (radixIndex n sh)) (updateAt zero (dropTree n (down sh)) newarr))
-dropTree n sh (Unbalanced arr sizes) =
-  case tryNatToFin 0 of
-    Nothing   =>
-      assert_total $ idris_crash "Data.RRBVector.dropTree: can't convert Nat to Fin"
-    Just zero =>
-      let newarr = force $ drop (fst $ relaxedRadixIndex sizes n sh) arr.arr
-        in assert_total $ computeSizes sh (A (minus arr.size (fst $ relaxedRadixIndex sizes n sh)) (updateAt zero (dropTree (snd $ relaxedRadixIndex sizes n sh) (down sh)) newarr))
-dropTree n _  (Leaf arr) =
-  let n      = integerToNat ((natToInteger n) .&. (natToInteger blockmask))
-      newarr = force $ drop n arr.arr
-    in Leaf (A (minus arr.size n) newarr)
+dropTree i sh (Balanced (MkChildren {n} children))                           =
+  let childidx            : Nat
+      childidx            = radixIndex i sh
+      remaining           : Nat
+      remaining           = minus n childidx
+      children'           : IArray remaining (Tree a)
+      children'           = force (drop childidx children)
+      0 remainingpositive : LT 0 remaining
+      remainingpositive   = believe_me ()
+      zero                : Fin remaining
+      zero                = natToFinLT 0 @{remainingpositive}
+      children''          : IArray remaining (Tree a)
+      children''          = updateAt zero (dropTree i (down sh)) children'
+      bounded             : Children a
+      bounded             = MkChildren {n = remaining} {nonEmpty = remainingpositive} {withinBlock = believe_me ()} children''
+    in assert_total (computeSizes sh bounded)
+dropTree i sh (Unbalanced (MkRelaxedChildren {n} {nonEmpty} children sizes)) =
+  let MkRelaxedIndex child subidx = relaxedRadixIndex {n} {nonEmpty} sizes i sh
+      childidx                    : Nat
+      childidx                    = finToNat child
+      remaining                   : Nat
+      remaining                   = minus n childidx
+      children'                   : IArray remaining (Tree a)
+      children'                   = force (drop childidx children)
+      0 remainingpositive         : LT 0 remaining
+      remainingpositive           = believe_me ()
+      zero                        : Fin remaining
+      zero                        = natToFinLT 0 @{remainingpositive}
+      children''                  : IArray remaining (Tree a)
+      children''                  = updateAt zero (dropTree subidx (down sh)) children'
+      bounded                     : Children a
+      bounded                     = MkChildren {n = remaining} {nonEmpty = remainingpositive} {withinBlock = believe_me ()} children''
+    in assert_total (computeSizes sh bounded)
+dropTree i _  (Leaf (A n elems))                                             =
+  let offset    : Nat
+      offset    = integerToNat ((natToInteger i) .&. natToInteger blockmask)
+      remaining : Nat
+      remaining = minus n offset
+      elems'    : IArray remaining a
+      elems'    = force (drop offset elems)
+    in Leaf (A remaining elems')
 
 ||| The first i elements of the vector.
 ||| If the vector contains less than or equal to i elements, the whole vector is returned. O(log n)
@@ -641,7 +686,8 @@ export
 take :  Nat
      -> RRBVector a
      -> RRBVector a
-take _ Empty                 = Empty
+take _ Empty                 =
+  empty
 take n v@(Root size sh tree) =
   case compare n 0 of
     LT =>
@@ -664,7 +710,8 @@ export
 drop :  Nat
      -> RRBVector a
      -> RRBVector a
-drop _ Empty                 = Empty
+drop _ Empty                 =
+  empty
 drop n v@(Root size sh tree) =
   case compare n 0 of
     LT =>
@@ -1063,30 +1110,50 @@ export
 Empty                >< v                    = v
 v                    >< Empty                = v
 Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
-  let upmaxshift = case compare sh1 sh2 of
-                     LT =>
-                       up sh2
-                     EQ =>
-                       up sh1
-                     GT =>
-                       up sh1
-      newarr     = mergeTrees tree1 sh1 tree2 sh2
-    in normalize $ Root (plus size1 size2) upmaxshift (computeSizes upmaxshift newarr)
+  let upmaxshift   = case compare sh1 sh2 of
+                       LT =>
+                         up sh2
+                       EQ =>
+                         up sh1
+                       GT =>
+                         up sh1
+      newarr       = mergeTrees tree1 sh1 tree2 sh2
+      rootchildren : Children a
+      rootchildren = childrenFromArray newarr
+    in normalize (Root (plus size1 size2) upmaxshift (computeSizes upmaxshift rootchildren))
   where
-    viewlArr : Array (Tree a) -> (Tree a, Array (Tree a))
-    viewlArr arr =
-      case tryNatToFin 0 of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.(><).viewlArr: can't convert Nat to Fin"
-        Just zero =>
-          (at arr.arr zero, drop 1 arr)
-    viewrArr : Array (Tree b) -> (Array (Tree b), Tree b)
-    viewrArr arr =
-      case tryNatToFin $ minus arr.size 1 of
-        Nothing   =>
-          assert_total $ idris_crash "Data.RRBVector.(><).viewrArr: can't convert Nat to Fin"
-        Just last =>
-          (take (minus arr.size 1) arr, at arr.arr last)
+    ||| Remove and return the first child of a nonempty tree array.
+    |||
+    ||| Arrays passed here originate from internal tree nodes and are therefore
+    ||| structurally nonempty.
+    |||
+    viewlArr :  Array (Tree a)
+             -> (Tree a, Array (Tree a))
+    viewlArr (A Z _)       =
+      assert_total (idris_crash "Data.RRBVector.(><).viewlArr: empty internal array")
+    viewlArr (A (S n) arr) =
+      let tail : IArray (minus n 0) (Tree a)
+          tail = force (drop 1 arr)
+        in ( at arr FZ
+           , A (minus n 0) tail
+           )
+    ||| Remove and return the final child of a nonempty tree array.
+    |||
+    ||| The final position is represented directly by `lastFin`, avoiding a
+    ||| dynamic conversion of `size - 1`.
+    |||
+    viewrArr :  Array (Tree b)
+             -> (Array (Tree b), Tree b)
+    viewrArr (A Z _)       =
+      assert_total (idris_crash "Data.RRBVector.(><).viewrArr: empty internal array")
+    viewrArr (A (S n) arr) =
+      let 0 initLTE : LTE n (S n)
+          initLTE   = believe_me ()
+          init      : IArray n (Tree b)
+          init      = force (take n arr @{initLTE})
+        in ( A n init
+           , at arr (lastFin {n})
+           )
     mergeRebalance' :  Shift
                     -> Array (Tree a)
                     -> Array (Tree a)
@@ -1107,7 +1174,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                                                                 (snocConcat newnode'))
                                                      ) t                
             newsubtree'    # t := read1 newsubtree t
-            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (childrenFromArray (fromList (cast {to=List (Tree a)} newsubtree'))))
                                                   ) t
             newroot'       # t := read1 newroot t
           in fromList (cast {to=List (Tree a)} newroot') # t
@@ -1133,7 +1200,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                          -> F1' s
         mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot t =
           let newsubtree' # t := read1 newsubtree t
-              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (childrenFromArray (fromList (cast {to=List (Tree a)} newsubtree'))))
                                                  ) t
               ()          # t := write1 newsubtree Lin t
             in write1 subtreecounter Z t
@@ -1198,7 +1265,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                                                                 (snocConcat newnode'))
                                                      ) t                
             newsubtree'    # t := read1 newsubtree t
-            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+            ()             # t := casmod1 newroot (\y => y :< (computeSizes sh (childrenFromArray (fromList (cast {to=List (Tree a)} newsubtree'))))
                                                   ) t
             newroot'       # t := read1 newroot t
           in fromList (cast {to=List (Tree a)} newroot') # t
@@ -1224,7 +1291,7 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
                                          -> F1' s
         mergeRebalanceRootSubtreeCounter sh subtreecounter newsubtree newroot t =
           let newsubtree' # t := read1 newsubtree t
-              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (fromList (cast {to=List (Tree a)} newsubtree')))
+              ()          # t := casmod1 newroot (\y => y :< (computeSizes sh (childrenFromArray (fromList (cast {to=List (Tree a)} newsubtree'))))
                                                  ) t
               ()          # t := write1 newsubtree Lin t
             in write1 subtreecounter Z t
@@ -1277,11 +1344,11 @@ Root size1 sh1 tree1 >< Root size2 sh2 tree2 =
     mergeRebalance sh left center right =
       case compare sh blockshift of
         LT =>
-          assert_total $ mergeRebalance' sh left center right treeToArray (computeSizes (down sh))
+          assert_total (mergeRebalance' sh left center right treeToArray (\arr => computeSizes (down sh) (childrenFromArray arr)))
         EQ =>
-          assert_total $ mergeRebalance'' sh left center right (\(Leaf arr) => arr) Leaf
+          assert_total (mergeRebalance'' sh left center right (\(Leaf arr) => arr) Leaf)
         GT =>
-          assert_total $ mergeRebalance' sh left center right treeToArray (computeSizes (down sh))
+          assert_total (mergeRebalance' sh left center right treeToArray (\arr => computeSizes (down sh) (childrenFromArray arr)))
     mergeTrees :  Tree a
                -> Nat
                -> Tree a
